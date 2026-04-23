@@ -6,7 +6,7 @@
 
 ## 현재 Phase
 
-**Phase 1 완료** — 다운로더 4종 + DuckDB + 품질 리포트 + CLI. 게이트 통과. Phase 2 진입 대기 (vectorbt/backtrader 설치는 Python 3.11/3.12 필요).
+**Phase 2 완료** — 이중 엔진(vbt/bt) 어댑터 + 비용·지표·양자화 유틸 + walk-forward + OOS 물리게이트 + RiskSimulator 래퍼. Phase 2 Go/No-Go 통과(SMA 교차에서 두 엔진 최종 equity ±1% 일치, 무비용·4.5 bps 모두). Phase 3(전략 4종) 진입 준비 완료.
 
 ## ⚠️ Strategy D 데이터 결정 보류 (2026-04-23 발견)
 
@@ -44,11 +44,21 @@ Phase 1 스코프는 klines / funding / metrics 3종으로 축소. Strategy D용
 - Phase 1 게이트 통과: BTCUSDT 1m 2024-03-15~21 다운로드 → DuckDB 일봉 집계 → 인접 일자 open/close 연속성 완벽 (7일 연속 0.1 단위 일치).
 - CLI: `python -m kairos.data.cli download --symbols BTCUSDT --start 2024-03-15 --end 2024-03-21 [--datasets ...]`, `quality-report --symbols ... --start ... --end ...`
 
-## 다음에 할 것 (Phase 2 진입)
+## Phase 2 실적 (2026-04-23 완료)
 
-1. ~~Python 3.11/3.12 설치 필요~~ **해결**: vectorbt 1.0.0이 Python 3.13 cp313 휠 제공 (numba 0.65 / llvmlite 0.47). 3.13.5에 `vectorbt==1.0.0 + backtrader` 설치 완료, SMA 크로스오버 실 실행 확인, 기존 37 테스트 회귀 없음 (pandas 3.0.2 → 2.3.3 다운그레이드됨 — vectorbt 의존).
-2. **Opus**: `kairos/backtest/protocols.py` 인터페이스 고정 (Strategy / Engine / BacktestResult / SignalFrame / CostModel / RiskRules).
-3. **Sonnet 6개 병렬 출격** (Phase 2 본격 시작): 2A vbt 어댑터, 2B bt 어댑터, 2C 비용, 2D 지표, 2E 양자화, 2F walk-forward+OOS 게이트.
+- Opus 선행: `kairos/backtest/protocols.py` FROZEN (BarsData/SignalFrame/CostModel/RiskRules/SymbolSpec/BacktestResult/Strategy/Engine + 6개 불변).
+- Sonnet 웨이브 1(3건 병렬): 2C costs(9 tests), 2D metrics(10 tests), 2E quantize(10 tests + `_symbol_specs.json`).
+- Sonnet 웨이브 2(3건 병렬): 2A `engine_vbt.py`(8 tests, `price=open.shift(-1)`로 vbt 1.0 `"nextopen"` 문자열 미지원 우회), 2B `engine_bt.py`(8 tests, 브로커 기본 슬리피지 + 초과분 후처리, 수동 equity 기록), 2F `oos_gate.py`+`walkforward.py`(25 tests, 반개구간 엄격 overlap).
+- Opus 웨이브 2 리뷰 수정: engine_bt의 `exit_reason` dtype을 `object`→`string`으로 수정(프로토콜 일치).
+- Phase 2 Go/No-Go 게이트: `tests/unit/test_cross_validation.py` — SMA(10/30) 교차 800바 × vbt/bt 양쪽 실행 → 무비용·4.5 bps 모두 최종 equity 1% 이내 일치, 거래수 ±2 이내.
+- Opus 직구현: `risk_simulator.py` — Kelly 사이징 + EOD flatten + 일/주/월 loss limit + MDD halt. 신호 재작성 + 엔진 재실행으로 최대 3패스 수렴. 9 tests.
+- 전체 테스트 119개 녹색(단위).
+
+## 다음에 할 것 (Phase 3 진입)
+
+1. **Opus 선행**: 각 전략(ORB/Funding/VolComp/Liquidation)의 골든 케이스 5건을 직접 손계산(Sonnet에게 위임 금지 — 전략 구현과 같은 오해가 테스트에 복사될 위험).
+2. **Strategy D 데이터 결정**: ARCHITECTURE §2.2의 (a)~(d) 중 사용자 확인 후 택1. Opus가 질문 후 진행.
+3. **Sonnet 8개 병렬** (Phase 3 본격): 3A~3D 전략 구현, 3E~3H 레짐별 pytest 골든 변환.
 
 ## 파라미터 튜닝 카운터 (전략당 10회 상한)
 
