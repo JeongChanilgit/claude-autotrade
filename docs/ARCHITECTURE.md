@@ -123,32 +123,28 @@ SELECT * FROM read_parquet('data/metrics/**/*.parquet', hive_partitioning=1);
 
 ---
 
-## 3. 백테스트 프로토콜 (Phase 2 선행 작업에서 확정)
+## 3. 백테스트 프로토콜 — FROZEN (2026-04-23)
 
-> 🟡 **TODO (Phase 2 선행 작업)**: `kairos/backtest/protocols.py`에 아래 프로토콜을 구현한 뒤 Sonnet 위임.
+**Source of truth**: `kairos/backtest/protocols.py`. 이 파일이 실제 계약.
+Sonnet 위임 프롬프트에는 반드시 전체를 첨부.
 
-드래프트:
+### 3.1 공개 심볼
+- `BarsData` — ohlcv DataFrame + 선택적 funding/metrics
+- `SignalFrame` — `side ∈ {-1,0,+1}`, `size_hint ∈ [0,1]`, `stop`, `target`
+- `CostModel` — taker 0.045% + 변동성 슬리피지 계수
+- `RiskRules` — **엔진 밖 래퍼** 전용 (Kelly 1/4, 일·주·월 한도, EOD flatten)
+- `SymbolSpec` — Decimal 기반 tickSize/stepSize/minNotional
+- `BacktestResult` — equity_curve / trades / metrics / engine_name / params
+- `Strategy` Protocol — `generate_signals(data, params) → SignalFrame`
+- `Engine` Protocol — `run(strategy, data, params, costs, symbol_spec, initial_cash) → BacktestResult`
 
-```python
-class Strategy(Protocol):
-    name: str
-    def generate_signals(self, data: BarsData, params: dict) -> SignalFrame: ...
-
-class Engine(Protocol):
-    def run(self, strategy, data, params, costs, risk) -> BacktestResult: ...
-
-@dataclass
-class BacktestResult:
-    equity_curve: pd.Series
-    trades: pd.DataFrame
-    metrics: dict
-    engine_name: str
-```
-
-**규칙**:
-- 리스크 시뮬레이션(일/주/월 한도, EOD flatten, Kelly 1/4)은 **엔진 위 래퍼**에서만. 각 엔진이 자체 구현하면 교차검증 의미 없음.
-- 수량/가격 양자화는 `kairos.backtest.quantize` 한 곳에서만 (Decimal 기반).
-- OOS 6개월은 `kairos.data.oos_gate`에서 물리적으로 차단.
+### 3.2 불변 규칙 (Opus 리뷰에서 체크)
+1. **No look-ahead**: T 시점 신호는 `close_time ≤ T` 바만 참조, 주문 체결은 T+1 open.
+2. **리스크는 엔진 위 래퍼**: daily/weekly/monthly 한도, MDD halt, Kelly sizing은 `risk_simulator`가 담당. 엔진은 순수 체결만.
+3. **양자화는 한 곳에서만**: `kairos.backtest.quantize` (Decimal 기반).
+4. **결정론**: 동일 입력 → 동일 출력. RNG 사용 시 seed 고정.
+5. **픽클러블**: `BacktestResult` 는 SQLite 저장을 위해 완전 직렬화 가능해야 함.
+6. **OOS 6개월**: `kairos.data.oos_gate` 에서 물리적으로 차단 (Phase 2 Sonnet-2F 담당).
 
 ---
 

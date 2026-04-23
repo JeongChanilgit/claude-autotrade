@@ -46,8 +46,8 @@ Phase 1 스코프는 klines / funding / metrics 3종으로 축소. Strategy D용
 
 ## 다음에 할 것 (Phase 2 진입)
 
-1. **사용자 액션**: Python 3.11 또는 3.12 설치 필요 (vectorbt 호환). 현재 시스템 3.13.5만.
-2. **Opus**: `pyproject.toml` 에 `engines` extras (vectorbt, backtrader) 버전 pin, `kairos/backtest/protocols.py` 인터페이스 고정 (Strategy / Engine / BacktestResult / SignalFrame).
+1. ~~Python 3.11/3.12 설치 필요~~ **해결**: vectorbt 1.0.0이 Python 3.13 cp313 휠 제공 (numba 0.65 / llvmlite 0.47). 3.13.5에 `vectorbt==1.0.0 + backtrader` 설치 완료, SMA 크로스오버 실 실행 확인, 기존 37 테스트 회귀 없음 (pandas 3.0.2 → 2.3.3 다운그레이드됨 — vectorbt 의존).
+2. **Opus**: `kairos/backtest/protocols.py` 인터페이스 고정 (Strategy / Engine / BacktestResult / SignalFrame / CostModel / RiskRules).
 3. **Sonnet 6개 병렬 출격** (Phase 2 본격 시작): 2A vbt 어댑터, 2B bt 어댑터, 2C 비용, 2D 지표, 2E 양자화, 2F walk-forward+OOS 게이트.
 
 ## 파라미터 튜닝 카운터 (전략당 10회 상한)
@@ -61,6 +61,5 @@ Phase 1 스코프는 klines / funding / metrics 3종으로 축소. Strategy D용
 
 ## 열려있는 이슈 / 주의사항
 
-- **Python 버전**: 시스템에 3.11/3.12 없음. 사용자 설치 전까지 `make install` 실행 불가. pyproject 제약으로 venv 생성 시점부터 차단.
-- **Binance Vision URL 패턴**: Phase 1 시작 전 공식 문서로 최신 경로 확인 필요. 심볼별 파일 존재 여부 편차 있음(특히 과거 날짜).
-- **vectorbt 라이선스/Python 호환**: OSS `vectorbt` 버전을 사용. PyPI 최신 호환 버전 재확인 후 pin.
+- **Binance Vision URL 패턴**: 심볼별 파일 존재 여부 편차 있음(특히 과거 날짜). 404는 `skipped=True, rows=0`로 넘기는 다운로더 규약으로 처리 중.
+- **pandas 2.3 다운그레이드**: vectorbt 1.0.0이 pandas < 3을 요구해 3.0.2 → 2.3.3. 기존 코드 회귀 없음 확인. 향후 pandas 3 복귀는 vectorbt 릴리스 대기.
