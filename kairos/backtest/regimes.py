@@ -67,4 +67,38 @@ def get_window(label: str) -> RegimeWindow:
     raise KeyError(f"no regime window with label={label!r}")
 
 
-__all__ = ["REGIMES", "RegimeWindow", "RegimeName", "get_regime", "get_window"]
+def slice_bars(data, window: RegimeWindow):
+    """Return a BarsData restricted to the half-open interval [window.start, window.end).
+
+    Slicing is non-destructive; the returned BarsData shares underlying frames
+    via pandas .loc filtering and is safe to pass into engines.
+    """
+    from kairos.backtest.protocols import BarsData
+
+    idx = data.ohlcv.index
+    mask = (idx >= window.start) & (idx < window.end)
+    ohlcv = data.ohlcv.loc[mask]
+
+    def _slice(df):
+        if df is None:
+            return None
+        m = (df.index >= window.start) & (df.index < window.end)
+        return df.loc[m]
+
+    return BarsData(
+        ohlcv=ohlcv,
+        symbol=data.symbol,
+        interval=data.interval,
+        funding=_slice(data.funding),
+        metrics=_slice(data.metrics),
+    )
+
+
+__all__ = [
+    "REGIMES",
+    "RegimeWindow",
+    "RegimeName",
+    "get_regime",
+    "get_window",
+    "slice_bars",
+]
