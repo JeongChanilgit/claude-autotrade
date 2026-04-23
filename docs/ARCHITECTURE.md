@@ -42,17 +42,9 @@ Sonnet 위임 프롬프트에는 반드시 `protocols.py` 전체를 첨부할 �
 
 Base: `https://data.binance.vision/`. 각 ZIP에는 `<url>.CHECKSUM` sidecar (형식: `<sha256>  <filename>` 공백2).
 
-### 2.2 ⚠️ liquidationSnapshot 제거됨 — Phase 3 재결정 필요
+### 2.2 liquidationSnapshot 제거됨 — Strategy D 폐기 (ADR-001, 2026-04-23)
 
-`data/futures/um/{daily,monthly}/liquidationSnapshot/` 프리픽스가 **S3 listing에서 완전히 빔**. 2026-04-23 확인. 원 Strategy D 설계가 직접 의존하던 데이터가 사라졌음.
-
-대안 (Phase 3 시작 시 Opus가 사용자 확인 후 결정):
-- **(a) aggTrades 기반 합성**: 대형 단방향 시장가 체결 버스트를 "청산 시그니처"로 검출. 풀 히스토리 보장(2026-03까지), 단 BTC 1개월 월별 ZIP ≈ 850MB → 3심볼 5년 ≈ 150GB 디스크·수십억 행 처리.
-- **(b) Binance `/fapi/v1/allForceOrders`**: 공식 API, 최근 7일 윈도우 제한 → 백필 불가. 자동 수집 루프 구축 필요(현 프로젝트 범위 밖).
-- **(c) 3rd-party 유료 소스**: $0 원칙 위배.
-- **(d) Strategy D 폐기, A/B/C 앙상블로 재조정**.
-
-**Phase 1 스코프 결정**: 위 선택은 Phase 3 전에 미룸. Phase 1은 klines / funding / metrics 3종만 다운로드. Strategy D를 (a)로 가는 경우 aggTrades 다운로더를 Phase 3 시작에 추가 개발.
+`data/futures/um/{daily,monthly}/liquidationSnapshot/` 프리픽스가 S3 listing에서 완전히 빔. Strategy D는 폐기하고 앙상블 가중치를 A40/B30/C30으로 재조정. 상세 근거: `docs/ADR-001-strategy-d-dropped.md`. Phase 1 데이터 스코프는 klines / funding / metrics 3종으로 고정.
 
 ### 2.3 Parquet 스키마 (FROZEN)
 

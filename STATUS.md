@@ -8,11 +8,9 @@
 
 **Phase 2 완료** — 이중 엔진(vbt/bt) 어댑터 + 비용·지표·양자화 유틸 + walk-forward + OOS 물리게이트 + RiskSimulator 래퍼. Phase 2 Go/No-Go 통과(SMA 교차에서 두 엔진 최종 equity ±1% 일치, 무비용·4.5 bps 모두). Phase 3(전략 4종) 진입 준비 완료.
 
-## ⚠️ Strategy D 데이터 결정 보류 (2026-04-23 발견)
+## Strategy D 폐기 확정 (2026-04-23, ADR-001)
 
-Binance Vision에서 **`liquidationSnapshot` 아카이브가 제공 중단됨** (`data/futures/um/{daily,monthly}/liquidationSnapshot/` 프리픽스 S3 listing empty). Strategy D 원 설계는 이 데이터에 의존.
-
-Phase 1 스코프는 klines / funding / metrics 3종으로 축소. Strategy D용 대체 데이터는 **Phase 3 시작 시점에 사용자 확인 후 결정** — 후보는 ARCHITECTURE §2.2 참조 (aggTrades 합성 ≈ 150GB / API 수집 / 폐기 중 택1).
+`liquidationSnapshot` 아카이브 제공 중단됨. 대안 (a) 디스크 150GB / (b) API 7일 백필 불가 / (c) $0 위배 → **(d) Strategy D 폐기, 앙상블 A40/B30/C30 재조정** 채택. 상세: `docs/ADR-001-strategy-d-dropped.md`.
 
 ## 완료된 작업
 
