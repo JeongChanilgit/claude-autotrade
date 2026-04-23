@@ -6,7 +6,7 @@
 
 ## 현재 Phase
 
-**Phase 1 — 데이터 파이프라인** (Opus 선행 작업 완료, Sonnet 4개 병렬 출격 직전)
+**Phase 1 완료** — 다운로더 4종 + DuckDB + 품질 리포트 + CLI. 게이트 통과. Phase 2 진입 대기 (vectorbt/backtrader 설치는 Python 3.11/3.12 필요).
 
 ## ⚠️ Strategy D 데이터 결정 보류 (2026-04-23 발견)
 
@@ -35,16 +35,20 @@ Phase 1 스코프는 klines / funding / metrics 3종으로 축소. Strategy D용
 - 단위 테스트 10건 (경로·URL·체크섬·ZIP 파서) 전부 녹색
 - `docs/ARCHITECTURE.md` §2 전체 갱신 (확정 스키마 + DuckDB DDL + 다운로더 7규약)
 
-## 다음에 할 것 (순서)
+## Phase 1 실적 (2026-04-23 완료)
 
-1. **Opus**: 이 상태 커밋 후 Sonnet 4개 worktree 병렬 출격
-   - Sonnet-1A `kairos/data/download_klines.py` (1m + 15m, 일별 ZIP → Parquet, 증분 갱신)
-   - Sonnet-1B `kairos/data/download_funding.py` (monthly ZIP → Parquet, 8h 간격 정합성)
-   - Sonnet-1C `kairos/data/download_metrics.py` (daily ZIP → Parquet, `create_time` ms 파싱)
-   - Sonnet-1D `kairos/data/query.py` + `kairos/data/quality_report.py` (DuckDB 뷰 DDL, 갭/결측/이상치 리포트, CLI 연결)
-2. **Opus 리뷰 게이트**: 4개 완료 후 일괄 리뷰 (interface 위반 / lookahead / 테스트 누락 체크)
-3. **Opus**: BTC 단일 월 전체 다운로드 → DuckDB 뷰로 일봉 집계 → Binance 공식 가격 ±0.01 확인 (Phase 1 게이트)
-4. **Phase 2 진입**: vectorbt / backtrader 설치 (Python 3.11/3.12 미설치면 이 시점에 해결)
+- Sonnet-1A/1B/1C: klines(1m/15m) / funding / metrics 다운로더. worktree 미사용(greenfield git repo 초기화 전), 파일이 겹치지 않아 안전.
+- Sonnet-1D: **rate limit으로 무출력** → Opus 직접 구현 (query.py / quality_report.py + 테스트 8건).
+- 테스트 37개 전부 녹색 (단위). `tests/integration/test_download_*_live.py` 3개는 네트워크 필요해 기본 실행 제외.
+- Opus가 수정한 버그: Sonnet-1C에서 `pq.read_table(target)` 사용 → Hive 파티션 경로에서 dict encoded `symbol` 컬럼 merge 실패. `pq.ParquetFile(target).read()`로 교체 (1A가 먼저 발견한 동일 이슈).
+- Phase 1 게이트 통과: BTCUSDT 1m 2024-03-15~21 다운로드 → DuckDB 일봉 집계 → 인접 일자 open/close 연속성 완벽 (7일 연속 0.1 단위 일치).
+- CLI: `python -m kairos.data.cli download --symbols BTCUSDT --start 2024-03-15 --end 2024-03-21 [--datasets ...]`, `quality-report --symbols ... --start ... --end ...`
+
+## 다음에 할 것 (Phase 2 진입)
+
+1. **사용자 액션**: Python 3.11 또는 3.12 설치 필요 (vectorbt 호환). 현재 시스템 3.13.5만.
+2. **Opus**: `pyproject.toml` 에 `engines` extras (vectorbt, backtrader) 버전 pin, `kairos/backtest/protocols.py` 인터페이스 고정 (Strategy / Engine / BacktestResult / SignalFrame).
+3. **Sonnet 6개 병렬 출격** (Phase 2 본격 시작): 2A vbt 어댑터, 2B bt 어댑터, 2C 비용, 2D 지표, 2E 양자화, 2F walk-forward+OOS 게이트.
 
 ## 파라미터 튜닝 카운터 (전략당 10회 상한)
 

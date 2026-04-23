@@ -10,7 +10,11 @@ import logging
 import sys
 from datetime import date, datetime, timedelta
 
-from kairos.data.protocols import Dataset
+from kairos.data.download_funding import FundingDownloader
+from kairos.data.download_klines import KlinesDownloader
+from kairos.data.download_metrics import MetricsDownloader
+from kairos.data.protocols import Dataset, FetchResult
+from kairos.data.quality_report import _format_report, generate_report
 
 log = logging.getLogger("kairos.data.cli")
 
@@ -38,26 +42,47 @@ def _months_in_range(start: date, end: date) -> list[date]:
     return out
 
 
+def _downloader_for(dataset: Dataset) -> object:
+    if dataset == "klines_1m":
+        return KlinesDownloader("1m")
+    if dataset == "klines_15m":
+        return KlinesDownloader("15m")
+    if dataset == "funding":
+        return FundingDownloader()
+    if dataset == "metrics":
+        return MetricsDownloader()
+    raise ValueError(f"unknown dataset: {dataset}")
+
+
 def cmd_download(args: argparse.Namespace) -> int:
-    """Dispatch to per-dataset downloaders. Populated by Sonnet-1D once individual
-    downloaders land. Until then this just prints what would run.
-    """
     symbols: list[str] = args.symbols
     start: date = _parse_date(args.start)
     end: date = _parse_date(args.end)
     datasets: list[Dataset] = args.datasets or list(ALL_DATASETS)
 
-    # TODO(Sonnet-1D): wire to real downloaders from kairos.data.download_*
-    log.warning("download CLI is a stub — individual downloaders land with Sonnet-1A/B/C")
+    totals: dict[str, int] = {"fetched": 0, "skipped": 0, "rows": 0}
     for ds in datasets:
+        dl = _downloader_for(ds)
         periods = _months_in_range(start, end) if ds == "funding" else _daterange(start, end)
-        log.info("would download %s for %s: %d periods", ds, ",".join(symbols), len(periods))
+        for symbol in symbols:
+            for period in periods:
+                result: FetchResult = dl.fetch(symbol, period)  # type: ignore[attr-defined]
+                totals["rows"] += result.rows
+                totals["skipped" if result.skipped else "fetched"] += 1
+
+    log.info(
+        "done: fetched=%d skipped=%d total_rows=%d",
+        totals["fetched"], totals["skipped"], totals["rows"],
+    )
     return 0
 
 
 def cmd_report(args: argparse.Namespace) -> int:
-    log.warning("quality report CLI is a stub — Sonnet-1D will populate")
-    _ = args
+    symbols: list[str] = args.symbols
+    start = _parse_date(args.start)
+    end = _parse_date(args.end)
+    report = generate_report(symbols, start, end)
+    print(_format_report(report))
     return 0
 
 
@@ -83,6 +108,8 @@ def main(argv: list[str] | None = None) -> int:
 
     pr = sub.add_parser("quality-report", help="Write data coverage + gap report")
     pr.add_argument("--symbols", nargs="+", required=True)
+    pr.add_argument("--start", required=True, help="YYYY-MM-DD inclusive")
+    pr.add_argument("--end", required=True, help="YYYY-MM-DD inclusive")
     pr.set_defaults(func=cmd_report)
 
     args = parser.parse_args(argv)
