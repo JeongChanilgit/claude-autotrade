@@ -1,0 +1,8 @@
+node_modules
+dist
+.vite
+*.log
+# TS composite build cache / emitted config
+*.tsbuildinfo
+vite.config.d.ts
+vite.config.js
