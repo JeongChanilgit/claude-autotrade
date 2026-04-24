@@ -15,6 +15,12 @@ import type {
 const OOS_START = "2024-11-01";
 const OOS_END = "2025-05-01";
 
+// Default [start, end) spans the full locally-downloaded range up to the OOS
+// seal. BTC 15m data covers 2020-10 .. 2024-08; newer coins that list later
+// are handled per-symbol by the engine (pre-listing bars produce no signals).
+const DEFAULT_START = "2020-10-01";
+const DEFAULT_END = "2024-09-01";
+
 const SYMBOL_SUGGESTIONS = [
   "BTCUSDT",
   "ETHUSDT",
@@ -91,8 +97,8 @@ export default function RunNew() {
 
   const [rows, setRows] = useState<SlotRow[]>([]);
   const [interval, setIntervalValue] = useState<IntervalName>("15m");
-  const [start, setStart] = useState<string>("");
-  const [end, setEnd] = useState<string>("");
+  const [start, setStart] = useState<string>(DEFAULT_START);
+  const [end, setEnd] = useState<string>(DEFAULT_END);
   const [engine, setEngine] = useState<EngineName>("vectorbt");
   const [initialCash, setInitialCash] = useState<number>(10000);
   const [applyRisk, setApplyRisk] = useState<boolean>(true);
