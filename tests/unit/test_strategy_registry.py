@@ -107,6 +107,9 @@ EXPECTED_NAMES = {
     "vol_compression",
     "ensemble",
     "vwap_reversion",
+    "ema_pullback",
+    "donchian_breakout",
+    "rsi2_pullback",
 }
 
 
