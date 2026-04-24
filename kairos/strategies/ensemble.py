@@ -40,8 +40,19 @@ class EnsembleStrategy:
         data: BarsData,
         params: Mapping[str, Any],
     ) -> SignalFrame:
-        merged: dict[str, Any] = {**self.default_params, **dict(params)}
-        weights: dict[str, float] = dict(merged["weights"])
+        # Drop empty-string / None values from caller params so the default
+        # for that key wins in the merge (guards against stale clients that
+        # sent a stringified dict for `weights`).
+        sanitized_params = {
+            k: v for k, v in dict(params).items() if v not in (None, "")
+        }
+        merged: dict[str, Any] = {**self.default_params, **sanitized_params}
+        raw_weights = merged["weights"]
+        # Older runs persisted `weights` as a JSON string; accept both.
+        if isinstance(raw_weights, str):
+            import json as _json
+            raw_weights = _json.loads(raw_weights)
+        weights: dict[str, float] = {str(k): float(v) for k, v in raw_weights.items()}
         corr_window = int(merged["corr_window"])
         corr_threshold = float(merged["corr_threshold"])
         corr_shrink_min = float(merged["corr_shrink_min"])
@@ -138,10 +149,6 @@ register(
         factory=lambda: build_default_ensemble(),
         default_params=EnsembleStrategy.default_params,
         param_schema={
-            "weights": ParamField(
-                type="string", default={"orb": 0.4, "funding_counter": 0.3, "vol_compression": 0.3},
-                help="Per-sub-strategy weight dict; values must sum to 1.0.",
-            ),
             "corr_window": ParamField(
                 type="int", default=1440, min=2, max=100000,
                 help="Rolling window (bars) for pairwise correlation of sub signals.",
