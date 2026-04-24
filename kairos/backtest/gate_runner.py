@@ -255,14 +255,30 @@ def run_gate(
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Phase 3 Go/No-Go gate runner")
-    p.add_argument("--symbol", required=True)
+    p.add_argument("--symbol", required=True, nargs="+", help="one or more symbols")
     p.add_argument("--interval", choices=["1m", "15m"], default="15m")
     p.add_argument("--start", required=True, help="YYYY-MM-DD")
     p.add_argument("--end", required=True, help="YYYY-MM-DD (exclusive)")
     p.add_argument("--initial-cash", default="10000")
-    p.add_argument("--out", default=None, help="output JSON path (default: stdout)")
+    p.add_argument(
+        "--out",
+        default=None,
+        help="output path: JSON file for single symbol, directory for multiple",
+    )
     p.add_argument("-v", "--verbose", action="store_true")
     return p.parse_args(argv)
+
+
+def _run_one(symbol: str, interval: str, start: pd.Timestamp, end: pd.Timestamp,
+             initial_cash: Decimal) -> dict:
+    try:
+        return run_gate(
+            symbol=symbol, interval=interval, start=start, end=end,
+            initial_cash=initial_cash,
+        )
+    except Exception as e:
+        log.warning("run_gate(%s) failed: %s", symbol, e)
+        return {"symbol": symbol, "error": str(e)}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -273,23 +289,43 @@ def main(argv: list[str] | None = None) -> int:
     )
     start = pd.Timestamp(args.start, tz="UTC")
     end = pd.Timestamp(args.end, tz="UTC")
-    out = run_gate(
-        symbol=args.symbol,
-        interval=args.interval,
-        start=start,
-        end=end,
-        initial_cash=Decimal(args.initial_cash),
-    )
-    text = json.dumps(out, indent=2, default=str)
-    if args.out:
-        Path(args.out).parent.mkdir(parents=True, exist_ok=True)
-        Path(args.out).write_text(text, encoding="utf-8")
-        for line in out.get("summary", []):
-            print(line)
-        print(f"\nFull report: {args.out}")
-    else:
-        print(text)
-    return 0 if out.get("gate", {}).get("overall_pass") else 1
+    initial_cash = Decimal(args.initial_cash)
+    symbols: list[str] = args.symbol
+
+    results = [_run_one(s, args.interval, start, end, initial_cash) for s in symbols]
+
+    if len(symbols) == 1:
+        out = results[0]
+        text = json.dumps(out, indent=2, default=str)
+        if args.out:
+            Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+            Path(args.out).write_text(text, encoding="utf-8")
+            for line in out.get("summary", []):
+                print(line)
+            print(f"\nFull report: {args.out}")
+        else:
+            print(text)
+        return 0 if out.get("gate", {}).get("overall_pass") else 1
+
+    # Multi-symbol: --out must be a directory
+    out_dir = Path(args.out) if args.out else None
+    if out_dir is not None:
+        out_dir.mkdir(parents=True, exist_ok=True)
+    all_pass = True
+    for sym, out in zip(symbols, results):
+        text = json.dumps(out, indent=2, default=str)
+        if out_dir is not None:
+            path = out_dir / f"phase3_gate_{sym}.json"
+            path.write_text(text, encoding="utf-8")
+            passed = bool(out.get("gate", {}).get("overall_pass"))
+            all_pass = all_pass and passed
+            status = "PASS" if passed else "FAIL"
+            print(f"[{status}] {sym} -> {path}")
+        else:
+            print(f"=== {sym} ===")
+            print(text)
+            all_pass = all_pass and bool(out.get("gate", {}).get("overall_pass"))
+    return 0 if all_pass else 1
 
 
 if __name__ == "__main__":

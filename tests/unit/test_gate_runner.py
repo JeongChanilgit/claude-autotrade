@@ -100,3 +100,56 @@ def test_ensemble_value_error_degrades_gracefully(monkeypatch):
     assert math.isnan(result["ensemble"]["cagr"])
     assert math.isnan(result["ensemble"]["mdd"])
     assert result["ensemble"]["total_trades"] == 0
+
+
+def test_main_multi_symbol_writes_one_report_per_symbol(monkeypatch, tmp_path):
+    import kairos.backtest.gate_runner as gr
+
+    calls: list[str] = []
+
+    def fake_run_gate(**kwargs):
+        calls.append(kwargs["symbol"])
+        return {
+            "symbol": kwargs["symbol"],
+            "summary": [f"{kwargs['symbol']} ok"],
+            "gate": {"overall_pass": True},
+        }
+
+    monkeypatch.setattr(gr, "run_gate", fake_run_gate)
+
+    rc = gr.main([
+        "--symbol", "BTCUSDT", "ETHUSDT", "SOLUSDT",
+        "--interval", "15m",
+        "--start", "2024-01-01",
+        "--end", "2024-01-02",
+        "--out", str(tmp_path),
+    ])
+
+    assert rc == 0
+    assert calls == ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
+    for sym in calls:
+        f = tmp_path / f"phase3_gate_{sym}.json"
+        assert f.exists()
+
+
+def test_main_multi_symbol_exit_code_1_on_any_failure(monkeypatch, tmp_path):
+    import kairos.backtest.gate_runner as gr
+
+    def fake_run_gate(**kwargs):
+        passing = kwargs["symbol"] == "BTCUSDT"
+        return {
+            "symbol": kwargs["symbol"],
+            "gate": {"overall_pass": passing},
+        }
+
+    monkeypatch.setattr(gr, "run_gate", fake_run_gate)
+
+    rc = gr.main([
+        "--symbol", "BTCUSDT", "ETHUSDT",
+        "--interval", "15m",
+        "--start", "2024-01-01",
+        "--end", "2024-01-02",
+        "--out", str(tmp_path),
+    ])
+
+    assert rc == 1
