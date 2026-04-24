@@ -5,6 +5,7 @@ import TradesTable from "../components/TradesTable";
 import type { Trade } from "../types";
 
 type ExitReasonFilter = Trade["exit_reason"] | "all";
+type SymbolFilter = string | "all";
 
 const EXIT_REASONS: ExitReasonFilter[] = [
   "all",
@@ -24,6 +25,7 @@ export default function Trades() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState<ExitReasonFilter>("all");
+  const [symbolFilter, setSymbolFilter] = useState<SymbolFilter>("all");
 
   useEffect(() => {
     if (!id) return;
@@ -47,10 +49,19 @@ export default function Trades() {
     };
   }, [id]);
 
+  const symbols = useMemo(
+    () => Array.from(new Set(trades.map((t) => t.symbol))).sort(),
+    [trades],
+  );
+
   const filtered = useMemo(
     () =>
-      filter === "all" ? trades : trades.filter((t) => t.exit_reason === filter),
-    [trades, filter],
+      trades.filter(
+        (t) =>
+          (filter === "all" || t.exit_reason === filter) &&
+          (symbolFilter === "all" || t.symbol === symbolFilter),
+      ),
+    [trades, filter, symbolFilter],
   );
 
   const stats = useMemo(() => {
@@ -73,20 +84,37 @@ export default function Trades() {
     <div className="flex flex-col gap-4">
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-bold">Trades · {id.slice(0, 8)}</h1>
-        <label className="flex items-center gap-2 text-sm">
-          <span className="text-slate-400 text-xs">Exit reason</span>
-          <select
-            className="bg-slate-900 border border-slate-700 rounded px-2 py-1 text-slate-100"
-            value={filter}
-            onChange={(e) => setFilter(e.target.value as ExitReasonFilter)}
-          >
-            {EXIT_REASONS.map((r) => (
-              <option key={r} value={r}>
-                {r}
-              </option>
-            ))}
-          </select>
-        </label>
+        <div className="flex items-center gap-4">
+          <label className="flex items-center gap-2 text-sm">
+            <span className="text-slate-400 text-xs">Symbol</span>
+            <select
+              className="bg-slate-900 border border-slate-700 rounded px-2 py-1 text-slate-100"
+              value={symbolFilter}
+              onChange={(e) => setSymbolFilter(e.target.value as SymbolFilter)}
+            >
+              <option value="all">all</option>
+              {symbols.map((s) => (
+                <option key={s} value={s}>
+                  {s}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="flex items-center gap-2 text-sm">
+            <span className="text-slate-400 text-xs">Exit reason</span>
+            <select
+              className="bg-slate-900 border border-slate-700 rounded px-2 py-1 text-slate-100"
+              value={filter}
+              onChange={(e) => setFilter(e.target.value as ExitReasonFilter)}
+            >
+              {EXIT_REASONS.map((r) => (
+                <option key={r} value={r}>
+                  {r}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
       </div>
 
       {total > PAGE_LIMIT ? (

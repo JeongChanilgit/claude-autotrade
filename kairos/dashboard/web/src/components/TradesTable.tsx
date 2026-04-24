@@ -13,6 +13,7 @@ const VIEWPORT_HEIGHT = 640;
 const OVERSCAN = 8;
 
 const COLUMNS: { key: keyof Trade; label: string; className?: string }[] = [
+  { key: "symbol", label: "Symbol", className: "w-24" },
   { key: "entry_time", label: "Entry", className: "w-40" },
   { key: "exit_time", label: "Exit", className: "w-40" },
   { key: "side", label: "Side", className: "w-14 text-right" },
@@ -77,7 +78,7 @@ export default function TradesTable({ rows }: TradesTableProps) {
                   : "text-slate-300";
             return (
               <div
-                key={`${row.entry_time}-${index}`}
+                key={`${row.symbol}-${row.entry_time}-${index}`}
                 style={{
                   position: "absolute",
                   top: index * ROW_HEIGHT,

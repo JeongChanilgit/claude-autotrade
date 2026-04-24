@@ -1,13 +1,12 @@
-"""SQLite persistence layer for the dashboard backend.
+"""SQLite v2 persistence layer for the dashboard backend — portfolio runs.
 
-Schema and method signatures are frozen by docs/phase4/SCHEMA.md — do not
+Schema and method signatures are frozen by docs/phase5/SCHEMA_V2.md — do not
 deviate without a contract change. One process-wide connection guarded by a
 threading.Lock; worker processes do not share this connection directly, they
 re-open their own via ``_get_conn`` inside whichever process they are in.
 
-Heavy artifacts (equity curve, trades frame) live on disk as parquet files
-under ``<data_root>/run_artifacts/<run_id>/``. The ``equity_path`` column on
-the row points at that directory.
+Heavy artifacts (portfolio equity, per-symbol equity, trades) live on disk as
+parquet files under ``<data_root>/run_artifacts/<run_id>/``.
 """
 from __future__ import annotations
 
@@ -19,42 +18,44 @@ import uuid
 from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 
 from kairos.dashboard.api.dtos import (
-    CreateRunRequest,
-    EngineName,
+    CreatePortfolioRunRequest,
+    EquityPayload,
+    EquityPayloadPerSymbol,
+    EquityPayloadTotal,
     RunDetail,
-    RunStatus,
     RunSummary,
-    Trade,
 )
 
 # ---------------------------------------------------------------------------
 # Paths / connection management
 # ---------------------------------------------------------------------------
 
-_DDL = """
+_V2_DDL = """
 CREATE TABLE IF NOT EXISTS backtest_runs (
-    id               TEXT PRIMARY KEY,
-    strategy         TEXT NOT NULL,
-    symbol           TEXT NOT NULL,
-    interval         TEXT NOT NULL CHECK(interval IN ('1m','15m')),
-    start_iso        TEXT NOT NULL,
-    end_iso          TEXT NOT NULL,
-    engine           TEXT NOT NULL CHECK(engine IN ('vectorbt','backtrader')),
-    params_json      TEXT NOT NULL,
-    initial_cash     REAL NOT NULL,
-    apply_risk       INTEGER NOT NULL DEFAULT 1,
-    status           TEXT NOT NULL CHECK(status IN ('pending','running','done','failed')),
-    created_at       TEXT NOT NULL,
-    started_at       TEXT,
-    finished_at      TEXT,
-    metrics_json     TEXT,
-    error_message    TEXT,
-    equity_path      TEXT,
-    trades_count     INTEGER
+    id                      TEXT PRIMARY KEY,
+    strategies_json         TEXT NOT NULL,
+    weights_json            TEXT NOT NULL,
+    symbols_json            TEXT NOT NULL,
+    interval                TEXT NOT NULL CHECK(interval IN ('1m','15m')),
+    start_iso               TEXT NOT NULL,
+    end_iso                 TEXT NOT NULL,
+    engine                  TEXT NOT NULL CHECK(engine IN ('vectorbt','backtrader')),
+    initial_cash            REAL NOT NULL,
+    apply_risk              INTEGER NOT NULL DEFAULT 1,
+    status                  TEXT NOT NULL CHECK(status IN ('pending','running','done','failed')),
+    created_at              TEXT NOT NULL,
+    started_at              TEXT,
+    finished_at             TEXT,
+    metrics_json            TEXT,
+    per_symbol_metrics_json TEXT,
+    error_message           TEXT,
+    artifacts_dir           TEXT,
+    trades_count            INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_runs_created_at ON backtest_runs(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_runs_status     ON backtest_runs(status);
@@ -67,7 +68,7 @@ _conn_cache: dict[tuple[int, str], sqlite3.Connection] = {}
 
 
 def _data_root() -> Path:
-    """Resolve the data root from env (tests override via KAIROS_DATA_ROOT)."""
+    # Tests override via KAIROS_DATA_ROOT so the on-disk db + parquets land in tmp_path.
     return Path(os.environ.get("KAIROS_DATA_ROOT", "data"))
 
 
@@ -83,6 +84,23 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _migrate_if_legacy(conn: sqlite3.Connection) -> None:
+    """Detect a Phase 4 single-symbol ``backtest_runs`` and rename it out of the way.
+
+    Phase 4 data is prototype-only; renaming to ``backtest_runs_v1`` preserves
+    it for forensic inspection while letting the v2 CREATE run on a clean slot.
+    """
+    cols = conn.execute("PRAGMA table_info(backtest_runs)").fetchall()
+    if not cols:
+        return
+    col_names = {str(c[1]) for c in cols}
+    if "strategies_json" in col_names:
+        return  # Already v2.
+    # Drop any prior rename target so repeated boots on legacy dbs are idempotent.
+    conn.execute("DROP TABLE IF EXISTS backtest_runs_v1")
+    conn.execute("ALTER TABLE backtest_runs RENAME TO backtest_runs_v1")
+
+
 def _get_conn() -> sqlite3.Connection:
     """Return a process-local connection, creating the DB + DDL on first use."""
     key = (os.getpid(), str(_db_path()))
@@ -92,7 +110,8 @@ def _get_conn() -> sqlite3.Connection:
         path.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(str(path), check_same_thread=False, isolation_level=None)
         conn.row_factory = sqlite3.Row
-        conn.executescript(_DDL)
+        _migrate_if_legacy(conn)
+        conn.executescript(_V2_DDL)
         _conn_cache[key] = conn
     return conn
 
@@ -113,12 +132,47 @@ def reset_cache_for_tests() -> None:
 # ---------------------------------------------------------------------------
 
 
+def _parse_json_obj(raw: str | None) -> dict[str, Any] | None:
+    if not raw:
+        return None
+    return json.loads(raw)
+
+
+def _parse_metrics(raw: str | None) -> dict[str, float] | None:
+    if not raw:
+        return None
+    obj = json.loads(raw)
+    # Coerce to float so the DTO type holds; int keys (trades_count) stay numeric.
+    return {str(k): float(v) for k, v in obj.items()}
+
+
+def _parse_per_symbol_metrics(
+    raw: str | None,
+) -> dict[str, dict[str, float]] | None:
+    if not raw:
+        return None
+    obj = json.loads(raw)
+    return {
+        str(sym): {str(k): float(v) for k, v in sub.items()}
+        for sym, sub in obj.items()
+    }
+
+
 def _row_to_summary(row: sqlite3.Row) -> RunSummary:
+    strategies_full = json.loads(row["strategies_json"])  # {sym: {name, params}}
+    # RunSummary only carries symbol->name mapping; params live in RunDetail.
+    strategies_names = {
+        str(sym): str(spec.get("name", "")) for sym, spec in strategies_full.items()
+    }
+    weights = {str(k): float(v) for k, v in json.loads(row["weights_json"]).items()}
+    symbols = list(json.loads(row["symbols_json"]))
+
     metrics = _parse_metrics(row["metrics_json"])
-    summary_kwargs: dict[str, object] = {
+    kwargs: dict[str, Any] = {
         "id": row["id"],
-        "strategy": row["strategy"],
-        "symbol": row["symbol"],
+        "symbols": symbols,
+        "strategies": strategies_names,
+        "weights": weights,
         "interval": row["interval"],
         "start": row["start_iso"],
         "end": row["end_iso"],
@@ -128,67 +182,73 @@ def _row_to_summary(row: sqlite3.Row) -> RunSummary:
     }
     if metrics is not None:
         if "cagr" in metrics:
-            summary_kwargs["cagr"] = float(metrics["cagr"])
+            kwargs["cagr"] = float(metrics["cagr"])
         if "mdd" in metrics:
-            summary_kwargs["mdd"] = float(metrics["mdd"])
+            kwargs["mdd"] = float(metrics["mdd"])
         if "sharpe" in metrics:
-            summary_kwargs["sharpe"] = float(metrics["sharpe"])
+            kwargs["sharpe"] = float(metrics["sharpe"])
         if "total_trades" in metrics:
-            summary_kwargs["total_trades"] = int(metrics["total_trades"])
+            kwargs["total_trades"] = int(metrics["total_trades"])
         elif row["trades_count"] is not None:
-            summary_kwargs["total_trades"] = int(row["trades_count"])
-    return RunSummary(**summary_kwargs)
+            kwargs["total_trades"] = int(row["trades_count"])
+    elif row["trades_count"] is not None:
+        kwargs["total_trades"] = int(row["trades_count"])
+    return RunSummary(**kwargs)
 
 
 def _row_to_detail(row: sqlite3.Row) -> RunDetail:
     summary = _row_to_summary(row)
+    strategies_full = json.loads(row["strategies_json"])  # {sym: {name, params}}
+    strategy_params = {
+        str(sym): dict(spec.get("params", {})) for sym, spec in strategies_full.items()
+    }
     metrics = _parse_metrics(row["metrics_json"])
-    params = json.loads(row["params_json"]) if row["params_json"] else {}
+    per_symbol_metrics = _parse_per_symbol_metrics(row["per_symbol_metrics_json"])
     return RunDetail(
         **summary.model_dump(),
-        params=params,
+        strategy_params=strategy_params,
         initial_cash=float(row["initial_cash"]),
         apply_risk_simulator=bool(row["apply_risk"]),
         metrics=metrics,
+        per_symbol_metrics=per_symbol_metrics,
         error=row["error_message"],
     )
 
 
-def _parse_metrics(raw: str | None) -> dict[str, float] | None:
-    if not raw:
-        return None
-    obj = json.loads(raw)
-    # Coerce everything to float so the DTO type holds.
-    return {str(k): float(v) for k, v in obj.items()}
-
-
 # ---------------------------------------------------------------------------
-# Repository API (signatures frozen — SCHEMA.md §Repository methods)
+# Repository API (signatures frozen — SCHEMA_V2.md §Repository methods)
 # ---------------------------------------------------------------------------
 
 
-def create_run(req: CreateRunRequest) -> str:
-    """Insert a pending run; return its ``run_<uuid>`` id."""
+def create_run(req: CreatePortfolioRunRequest) -> str:
+    """Insert a pending portfolio run; return its ``run_<uuid>`` id."""
     run_id = "run_" + uuid.uuid4().hex
+    strategies_payload = {
+        sym: {"name": spec.name, "params": dict(spec.params)}
+        for sym, spec in req.strategies.items()
+    }
+    weights_payload = {sym: float(w) for sym, w in req.weights.items()}
+    # Denormalized sorted symbol list lets listing queries avoid decoding the full spec.
+    symbols_payload = sorted(req.strategies.keys())
     with _lock:
         conn = _get_conn()
         conn.execute(
             """
             INSERT INTO backtest_runs (
-                id, strategy, symbol, interval, start_iso, end_iso,
-                engine, params_json, initial_cash, apply_risk,
-                status, created_at
+                id, strategies_json, weights_json, symbols_json,
+                interval, start_iso, end_iso, engine,
+                initial_cash, apply_risk, status, created_at
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
             """,
             (
                 run_id,
-                req.strategy,
-                req.symbol,
+                json.dumps(strategies_payload),
+                json.dumps(weights_payload),
+                json.dumps(symbols_payload),
                 req.interval,
                 req.start,
                 req.end,
                 req.engine,
-                json.dumps(dict(req.params)),
                 float(req.initial_cash),
                 1 if req.apply_risk_simulator else 0,
                 _now_iso(),
@@ -225,17 +285,6 @@ def list_runs(limit: int = 100, status: str | None = None) -> list[RunSummary]:
     return [_row_to_summary(r) for r in rows]
 
 
-def update_status(run_id: str, status: str, *, error: str | None = None) -> None:
-    """Generic status setter — prefer the specific helpers below."""
-    with _lock:
-        conn = _get_conn()
-        conn.execute(
-            "UPDATE backtest_runs SET status = ?, error_message = COALESCE(?, error_message) "
-            "WHERE id = ?",
-            (status, error, run_id),
-        )
-
-
 def mark_running(run_id: str) -> None:
     with _lock:
         conn = _get_conn()
@@ -248,24 +297,34 @@ def mark_running(run_id: str) -> None:
 def mark_done(
     run_id: str,
     metrics: Mapping[str, float],
-    equity_path: str,
+    per_symbol_metrics: Mapping[str, Mapping[str, float]],
+    artifacts_dir: str,
     trades_count: int,
 ) -> None:
+    metrics_json = json.dumps({str(k): float(v) for k, v in metrics.items()})
+    per_symbol_json = json.dumps(
+        {
+            str(sym): {str(k): float(v) for k, v in sub.items()}
+            for sym, sub in per_symbol_metrics.items()
+        }
+    )
     with _lock:
         conn = _get_conn()
         conn.execute(
             """
             UPDATE backtest_runs
-               SET status       = 'done',
-                   metrics_json = ?,
-                   equity_path  = ?,
-                   trades_count = ?,
-                   finished_at  = ?
+               SET status                  = 'done',
+                   metrics_json            = ?,
+                   per_symbol_metrics_json = ?,
+                   artifacts_dir           = ?,
+                   trades_count            = ?,
+                   finished_at             = ?
              WHERE id = ?
             """,
             (
-                json.dumps({k: float(v) for k, v in metrics.items()}),
-                equity_path,
+                metrics_json,
+                per_symbol_json,
+                artifacts_dir,
                 int(trades_count),
                 _now_iso(),
                 run_id,
@@ -299,15 +358,13 @@ def _lttb_downsample(
     """Largest-Triangle-Three-Buckets down-sampler.
 
     Preserves first + last points; returns at most ``threshold`` samples.
-    No numpy; pure Python is fast enough for the ~tens-of-thousands bars we
-    hit in practice and avoids allocating parallel arrays.
+    Pure Python — fast enough for tens-of-thousands of bars and avoids a numpy
+    conversion round-trip over string-typed timestamps.
     """
     n = len(values)
     if threshold >= n or threshold < 3:
         return list(ts), list(values)
 
-    # Each of the middle (threshold - 2) points is picked from a bucket of
-    # size (n - 2) / (threshold - 2).
     bucket_size = (n - 2) / (threshold - 2)
 
     out_ts: list[str] = [ts[0]]
@@ -315,7 +372,6 @@ def _lttb_downsample(
 
     a = 0  # index of the previously selected point
     for i in range(threshold - 2):
-        # Range of the NEXT bucket (used for avg point).
         next_start = int((i + 1) * bucket_size) + 1
         next_end = min(int((i + 2) * bucket_size) + 1, n)
         if next_start >= next_end:
@@ -325,13 +381,11 @@ def _lttb_downsample(
             avg_x = (next_start + next_end - 1) / 2.0
             avg_y = sum(values[next_start:next_end]) / float(next_end - next_start)
 
-        # Range of the CURRENT bucket (we pick one point from here).
         cur_start = int(i * bucket_size) + 1
         cur_end = min(int((i + 1) * bucket_size) + 1, n)
         if cur_start >= cur_end:
             continue
 
-        # Compute the triangle area for every candidate; choose argmax.
         a_x = float(a)
         a_y = values[a]
         max_area = -1.0
@@ -353,31 +407,79 @@ def _lttb_downsample(
     return out_ts, out_v
 
 
-def load_equity(run_id: str) -> tuple[list[str], list[float]]:
-    """Read the equity parquet for a run, LTTB-downsampled to ≤5000 points."""
-    path = _artifacts_dir(run_id) / "equity.parquet"
+def _downsample_multi(
+    ts: list[str], series: dict[str, list[float]], threshold: int
+) -> tuple[list[str], dict[str, list[float]]]:
+    """Downsample a family of curves on a shared time axis.
+
+    We pick indices using the sum across symbols so every series is sampled at
+    exactly the same timestamps (required for stacked-area rendering).
+    """
+    n = len(ts)
+    if threshold >= n or threshold < 3 or not series:
+        return list(ts), {sym: list(v) for sym, v in series.items()}
+
+    totals = [sum(series[sym][i] for sym in series) for i in range(n)]
+    reduced_ts, _ = _lttb_downsample(ts, totals, threshold)
+
+    # Build an index from the sampled timestamps back into the full axis. The
+    # timestamps are unique by construction (one per bar), so direct lookup works.
+    index_of = {t: i for i, t in enumerate(ts)}
+    picked = [index_of[t] for t in reduced_ts]
+    reduced = {sym: [series[sym][i] for i in picked] for sym in series}
+    return reduced_ts, reduced
+
+
+def load_equity(run_id: str, *, per_symbol: bool = False) -> EquityPayload:
+    """Read equity parquet for a run, LTTB-downsampled to ≤ 5000 points.
+
+    ``per_symbol=False`` returns the portfolio total from ``equity.parquet``;
+    ``per_symbol=True`` returns one curve per symbol from ``equity_per_symbol.parquet``.
+    Missing artifact files produce an empty payload (not an error) so callers
+    can distinguish "run still pending" from "run failed".
+    """
+    artifacts = _artifacts_dir(run_id)
+    if per_symbol:
+        path = artifacts / "equity_per_symbol.parquet"
+        if not path.exists():
+            return EquityPayloadPerSymbol(timestamps=[], per_symbol={})
+        df = pd.read_parquet(path)
+        if "timestamp" not in df.columns:
+            raise ValueError(
+                f"per-symbol equity parquet at {path} missing 'timestamp' column "
+                f"(got {list(df.columns)})"
+            )
+        ts = [str(x) for x in df["timestamp"].tolist()]
+        symbol_cols = [c for c in df.columns if c != "timestamp"]
+        series = {sym: [float(x) for x in df[sym].tolist()] for sym in symbol_cols}
+        if ts and len(ts) > 5000:
+            ts, series = _downsample_multi(ts, series, 5000)
+        return EquityPayloadPerSymbol(timestamps=ts, per_symbol=series)
+
+    path = artifacts / "equity.parquet"
     if not path.exists():
-        return [], []
+        return EquityPayloadTotal(timestamps=[], equity=[])
     df = pd.read_parquet(path)
-    # Required columns per the worker spec.
-    ts_col = "timestamp"
-    eq_col = "equity"
-    if ts_col not in df.columns or eq_col not in df.columns:
+    if "timestamp" not in df.columns or "equity" not in df.columns:
         raise ValueError(
-            f"equity parquet at {path} missing required columns (expected "
-            f"{ts_col!r} and {eq_col!r}, got {list(df.columns)})"
+            f"equity parquet at {path} missing required columns "
+            f"(expected 'timestamp' and 'equity', got {list(df.columns)})"
         )
-    ts = [str(x) for x in df[ts_col].tolist()]
-    eq = [float(x) for x in df[eq_col].tolist()]
+    ts = [str(x) for x in df["timestamp"].tolist()]
+    eq = [float(x) for x in df["equity"].tolist()]
     if len(eq) > 5000:
         ts, eq = _lttb_downsample(ts, eq, 5000)
-    return ts, eq
+    return EquityPayloadTotal(timestamps=ts, equity=eq)
 
 
 def load_trades(
     run_id: str, offset: int, limit: int
-) -> tuple[list[Trade], int]:
-    """Page through the trades parquet."""
+) -> tuple[list[dict[str, Any]], int]:
+    """Page through the trades parquet; returns plain dicts + total count.
+
+    Returning dicts (not Trade instances) keeps this layer cheap — routes can
+    materialize Pydantic models where they actually need validation.
+    """
     path = _artifacts_dir(run_id) / "trades.parquet"
     if not path.exists():
         return [], 0
@@ -388,26 +490,28 @@ def load_trades(
     lo = max(0, int(offset))
     hi = min(total, lo + int(limit))
     page = df.iloc[lo:hi]
-    trades: list[Trade] = []
+
+    out: list[dict[str, Any]] = []
     for rec in page.to_dict(orient="records"):
-        trades.append(
-            Trade(
-                entry_time=_ts_to_iso(rec["entry_time"]),
-                exit_time=_ts_to_iso(rec["exit_time"]),
-                side=int(rec["side"]),  # type: ignore[arg-type]
-                qty=float(rec["qty"]),
-                entry_price=float(rec["entry_price"]),
-                exit_price=float(rec["exit_price"]),
-                gross_pnl=float(rec["gross_pnl"]),
-                fees=float(rec["fees"]),
-                slippage=float(rec["slippage"]),
-                funding_cost=float(rec["funding_cost"]),
-                net_pnl=float(rec["net_pnl"]),
-                bars_held=int(rec["bars_held"]),
-                exit_reason=str(rec["exit_reason"]),  # type: ignore[arg-type]
-            )
+        out.append(
+            {
+                "symbol": str(rec["symbol"]),
+                "entry_time": _ts_to_iso(rec["entry_time"]),
+                "exit_time": _ts_to_iso(rec["exit_time"]),
+                "side": int(rec["side"]),
+                "qty": float(rec["qty"]),
+                "entry_price": float(rec["entry_price"]),
+                "exit_price": float(rec["exit_price"]),
+                "gross_pnl": float(rec["gross_pnl"]),
+                "fees": float(rec["fees"]),
+                "slippage": float(rec["slippage"]),
+                "funding_cost": float(rec["funding_cost"]),
+                "net_pnl": float(rec["net_pnl"]),
+                "bars_held": int(rec["bars_held"]),
+                "exit_reason": str(rec["exit_reason"]),
+            }
         )
-    return trades, total
+    return out, total
 
 
 def _ts_to_iso(ts: object) -> str:
@@ -420,7 +524,7 @@ def _ts_to_iso(ts: object) -> str:
     if isinstance(ts, datetime):
         t = ts.astimezone(timezone.utc) if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
         return t.strftime("%Y-%m-%dT%H:%M:%SZ")
-    # Fall back to str(); pandas to_dict may hand us numpy datetime64 in some versions.
+    # Fall back to str(); pandas to_dict can hand us numpy datetime64 in some versions.
     return str(ts)
 
 
@@ -434,5 +538,4 @@ __all__ = [
     "mark_failed",
     "mark_running",
     "reset_cache_for_tests",
-    "update_status",
 ]

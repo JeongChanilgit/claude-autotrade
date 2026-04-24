@@ -37,7 +37,7 @@ def test_phase3_gate_returns_structured_report_on_real_data() -> None:
     start = pd.Timestamp("2023-01-01", tz="UTC")
     end = pd.Timestamp("2023-06-01", tz="UTC")
     out = run_gate(
-        symbol="BTCUSDT",
+        symbols=["BTCUSDT"],
         interval="15m",
         start=start,
         end=end,
@@ -46,9 +46,10 @@ def test_phase3_gate_returns_structured_report_on_real_data() -> None:
     assert "error" not in out
     assert out["bars"] > 0
     assert len(out["strategy_sharpes"]) == 3
-    assert {s["name"] for s in out["strategy_sharpes"]} == {
+    assert {s["strategy"] for s in out["strategy_sharpes"]} == {
         "orb", "funding_counter", "vol_compression",
     }
+    assert all(s["symbol"] == "BTCUSDT" for s in out["strategy_sharpes"])
     assert "cagr" in out["ensemble"]
     assert "mdd" in out["ensemble"]
     assert isinstance(out["regimes"], list)

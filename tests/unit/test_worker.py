@@ -9,17 +9,11 @@ import pandas as pd
 import pytest
 
 from kairos.dashboard.api import progress, repo, worker
-from kairos.dashboard.api.dtos import CreateRunRequest
-
-
-# ---------------------------------------------------------------------------
-# Fixtures
-# ---------------------------------------------------------------------------
+from kairos.dashboard.api.dtos import CreatePortfolioRunRequest
 
 
 @pytest.fixture()
 def isolated_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    """Point the repo at a fresh tmp data root per test."""
     monkeypatch.setenv("KAIROS_DATA_ROOT", str(tmp_path))
     repo.reset_cache_for_tests()
     progress.reset_for_tests()
@@ -30,38 +24,30 @@ def isolated_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     repo.reset_cache_for_tests()
 
 
-def _make_request(**overrides: object) -> CreateRunRequest:
-    base = {
-        "strategy": "orb",
-        "symbol": "BTCUSDT",
+def _make_request(**overrides: object) -> CreatePortfolioRunRequest:
+    base: dict[str, Any] = {
+        "strategies": {"BTCUSDT": {"name": "orb", "params": {}}},
+        "weights": {"BTCUSDT": 1.0},
         "interval": "1m",
         "start": "2024-01-01T00:00:00Z",
         "end": "2024-01-02T00:00:00Z",
         "engine": "vectorbt",
-        "params": {},
         "initial_cash": 10_000.0,
         "apply_risk_simulator": False,
     }
     base.update(overrides)
-    return CreateRunRequest.model_validate(base)
-
-
-# ---------------------------------------------------------------------------
-# Fake job target — writes artifacts + pushes progress, mirrors the real shape
-# ---------------------------------------------------------------------------
+    return CreatePortfolioRunRequest.model_validate(base)
 
 
 def _fake_run_backtest_job(run_id: str, progress_queue: Any) -> None:
-    """Stand-in for jobs.run_backtest_job that skips the heavy engine path."""
     progress_queue.put({"run_id": run_id, "message": {
         "type": "progress", "pct": 0.0, "stage": "start", "log": "starting",
     }})
     repo.mark_running(run_id)
     progress_queue.put({"run_id": run_id, "message": {
-        "type": "progress", "pct": 50.0, "stage": "engine", "log": "running engine",
+        "type": "progress", "pct": 50.0, "stage": "engine", "log": "running",
     }})
 
-    # Build minimal artifacts in the tmp data root.
     artifacts = repo._artifacts_dir(run_id)  # noqa: SLF001 — test helper
     artifacts.mkdir(parents=True, exist_ok=True)
 
@@ -72,7 +58,14 @@ def _fake_run_backtest_job(run_id: str, progress_queue: Any) -> None:
     })
     eq_df.to_parquet(artifacts / "equity.parquet", index=False)
 
+    eq_per_df = pd.DataFrame({
+        "timestamp": eq_df["timestamp"],
+        "BTCUSDT": eq_df["equity"],
+    })
+    eq_per_df.to_parquet(artifacts / "equity_per_symbol.parquet", index=False)
+
     trades_df = pd.DataFrame({
+        "symbol": ["BTCUSDT", "BTCUSDT"],
         "entry_time": idx[:2],
         "exit_time": idx[:2] + pd.Timedelta(minutes=1),
         "side": [1, -1],
@@ -89,21 +82,17 @@ def _fake_run_backtest_job(run_id: str, progress_queue: Any) -> None:
     })
     trades_df.to_parquet(artifacts / "trades.parquet", index=False)
 
-    metrics = {"cagr": 0.25, "mdd": -0.05, "sharpe": 1.2, "total_trades": 2}
+    metrics = {"cagr": 0.25, "mdd": -0.05, "sharpe": 1.2, "total_trades": 2.0}
     repo.mark_done(
         run_id,
         metrics=metrics,
-        equity_path=str(artifacts),
+        per_symbol_metrics={"BTCUSDT": metrics},
+        artifacts_dir=str(artifacts),
         trades_count=2,
     )
     progress_queue.put({"run_id": run_id, "message": {
         "type": "done", "metrics": metrics,
     }})
-
-
-# ---------------------------------------------------------------------------
-# Fake pool — records apply_async calls and runs the target synchronously
-# ---------------------------------------------------------------------------
 
 
 class _FakeAsyncResult:
@@ -146,18 +135,11 @@ class _FakePool:
         pass
 
 
-# ---------------------------------------------------------------------------
-# Tests
-# ---------------------------------------------------------------------------
-
-
 def test_submit_dispatches_to_pool_with_queue(
     isolated_env: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    # Capture the target + args without running a real child process.
     fake_pool = _FakePool()
     monkeypatch.setattr(worker, "_pool", fake_pool, raising=False)
-    # Use an in-process queue substitute so we don't spin up a Manager.
     fake_q: _queue.Queue[dict[str, Any]] = _queue.Queue()
     monkeypatch.setattr(
         "kairos.dashboard.api.progress.get_queue", lambda: fake_q
@@ -193,26 +175,23 @@ def test_fake_job_transitions_pending_to_done_and_writes_artifacts(
     worker.set_job_target_for_tests(_fake_run_backtest_job)
 
     rid = repo.create_run(_make_request())
-    # Sanity — row starts pending.
-    assert repo.get_run(rid).status == "pending"  # type: ignore[union-attr]
+    initial = repo.get_run(rid)
+    assert initial is not None and initial.status == "pending"
 
     result = worker.submit(rid)
     result.get(timeout=5.0)
 
-    # Row transitioned pending -> running -> done inside the fake job.
     final = repo.get_run(rid)
     assert final is not None
     assert final.status == "done"
     assert final.metrics is not None
     assert final.metrics["cagr"] == pytest.approx(0.25)
-    assert final.total_trades == 2
 
-    # Artifacts exist.
     artifacts = isolated_env / "run_artifacts" / rid
     assert (artifacts / "equity.parquet").exists()
+    assert (artifacts / "equity_per_symbol.parquet").exists()
     assert (artifacts / "trades.parquet").exists()
 
-    # Progress messages were recorded in order.
     messages: list[dict[str, Any]] = []
     while not fake_q.empty():
         messages.append(fake_q.get_nowait())

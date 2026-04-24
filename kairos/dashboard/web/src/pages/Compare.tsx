@@ -14,7 +14,7 @@ import {
 import { compareRuns } from "../api";
 import PassFailBadge from "../components/PassFailBadge";
 import { useAppStore } from "../store";
-import type { CompareReport } from "../types";
+import type { CompareReport, RunSummary } from "../types";
 
 const TOLERANCE = 0.01;
 
@@ -240,7 +240,7 @@ export default function Compare() {
 
 interface RunSelectProps {
   label: string;
-  runs: { id: string; strategy: string; symbol: string; engine: string }[];
+  runs: RunSummary[];
   value: string | null;
   onChange: (id: string | null) => void;
 }
@@ -255,11 +255,17 @@ function RunSelect({ label, runs, value, onChange }: RunSelectProps) {
         onChange={(e) => onChange(e.target.value || null)}
       >
         <option value="">— select run —</option>
-        {runs.map((r) => (
-          <option key={r.id} value={r.id}>
-            {r.id.slice(0, 8)} · {r.strategy} · {r.symbol} · {r.engine}
-          </option>
-        ))}
+        {runs.map((r) => {
+          const symbols = r.symbols.join(",");
+          const strategies = Array.from(
+            new Set(Object.values(r.strategies)),
+          ).join(",");
+          return (
+            <option key={r.id} value={r.id}>
+              {r.id.slice(0, 8)} · {strategies} · {symbols} · {r.engine}
+            </option>
+          );
+        })}
       </select>
     </label>
   );

@@ -14,6 +14,10 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from kairos import __version__
+# Eager import: each strategy module self-registers on load, so importing the
+# package here guarantees /api/strategies reflects the full registry at startup
+# regardless of which route happens to be hit first.
+from kairos import strategies as _strategies  # noqa: F401
 from kairos.dashboard.api import progress
 from kairos.dashboard.api.errors import register_exception_handlers
 from kairos.dashboard.api.reports import reports_router

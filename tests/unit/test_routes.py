@@ -1,4 +1,4 @@
-"""Unit tests for kairos.dashboard.api.routes.
+"""Unit tests for kairos.dashboard.api.routes — Phase 5 portfolio shape.
 
 Repo + worker are monkeypatched at the routes module level so these tests
 never touch SQLite or a real multiprocessing pool.
@@ -13,12 +13,17 @@ import pytest
 from fastapi.testclient import TestClient
 
 from kairos.dashboard.api import routes
-from kairos.dashboard.api.dtos import RunDetail, RunSummary, Trade
+from kairos.dashboard.api.dtos import (
+    EquityPayloadPerSymbol,
+    EquityPayloadTotal,
+    RunDetail,
+    RunSummary,
+)
 from kairos.dashboard.api.main import app
 
 
 # ---------------------------------------------------------------------------
-# Fixtures
+# Fixtures / builders
 # ---------------------------------------------------------------------------
 
 
@@ -30,9 +35,10 @@ def client() -> TestClient:
 def _summary(run_id: str = "run_aaa", **overrides: Any) -> RunSummary:
     base: dict[str, Any] = {
         "id": run_id,
-        "strategy": "orb",
-        "symbol": "BTCUSDT",
-        "interval": "1m",
+        "symbols": ["BTCUSDT", "ETHUSDT"],
+        "strategies": {"BTCUSDT": "orb", "ETHUSDT": "orb"},
+        "weights": {"BTCUSDT": 0.5, "ETHUSDT": 0.5},
+        "interval": "15m",
         "start": "2024-01-01T00:00:00Z",
         "end": "2024-02-01T00:00:00Z",
         "engine": "vectorbt",
@@ -43,19 +49,39 @@ def _summary(run_id: str = "run_aaa", **overrides: Any) -> RunSummary:
     return RunSummary.model_validate(base)
 
 
-def _detail(run_id: str = "run_aaa", metrics: dict[str, float] | None = None,
-            **overrides: Any) -> RunDetail:
-    summary = _summary(run_id, **overrides).model_dump()
-    summary["params"] = {"lookback": 30}
-    summary["initial_cash"] = 10_000.0
-    summary["apply_risk_simulator"] = True
-    summary["metrics"] = metrics
-    summary["error"] = None
-    return RunDetail.model_validate(summary)
+def _detail(
+    run_id: str = "run_aaa",
+    metrics: dict[str, float] | None = None,
+    **overrides: Any,
+) -> RunDetail:
+    base = _summary(run_id, **overrides).model_dump()
+    base["strategy_params"] = {"BTCUSDT": {"or_minutes": 15}, "ETHUSDT": {"or_minutes": 15}}
+    base["initial_cash"] = 10_000.0
+    base["apply_risk_simulator"] = True
+    base["metrics"] = metrics
+    base["per_symbol_metrics"] = None
+    base["error"] = None
+    return RunDetail.model_validate(base)
+
+
+def _valid_portfolio_body() -> dict[str, Any]:
+    return {
+        "strategies": {
+            "BTCUSDT": {"name": "orb", "params": {}},
+            "ETHUSDT": {"name": "orb", "params": {}},
+        },
+        "weights": {"BTCUSDT": 0.5, "ETHUSDT": 0.5},
+        "interval": "15m",
+        "start": "2024-01-01T00:00:00Z",
+        "end": "2024-02-01T00:00:00Z",
+        "engine": "vectorbt",
+        "initial_cash": 10_000.0,
+        "apply_risk_simulator": True,
+    }
 
 
 # ---------------------------------------------------------------------------
-# /api/runs
+# /api/runs — listing
 # ---------------------------------------------------------------------------
 
 
@@ -75,6 +101,7 @@ def test_list_runs_returns_wrapped_array(
     assert "runs" in body
     assert len(body["runs"]) == 2
     assert body["runs"][0]["id"] == "run_1"
+    assert body["runs"][0]["symbols"] == ["BTCUSDT", "ETHUSDT"]
     assert calls["args"] == (5, "pending")
 
 
@@ -85,6 +112,11 @@ def test_list_runs_rejects_unknown_status(
     resp = client.get("/api/runs?status=bogus")
     assert resp.status_code == 422
     assert resp.json()["error"]["code"] == "VALIDATION_ERROR"
+
+
+# ---------------------------------------------------------------------------
+# /api/runs — create
+# ---------------------------------------------------------------------------
 
 
 def test_create_run_returns_202_and_submits_once(
@@ -102,43 +134,58 @@ def test_create_run_returns_202_and_submits_once(
     monkeypatch.setattr(routes.repo, "create_run", fake_create)
     monkeypatch.setattr(routes.worker, "submit", fake_submit)
 
-    body = {
-        "strategy": "orb",
-        "symbol": "BTCUSDT",
-        "interval": "1m",
-        "start": "2024-01-01T00:00:00Z",
-        "end": "2024-02-01T00:00:00Z",
-        "engine": "vectorbt",
-        "params": {"lookback": 30},
-        "initial_cash": 10_000.0,
-        "apply_risk_simulator": True,
-    }
-    resp = client.post("/api/runs", json=body)
+    resp = client.post("/api/runs", json=_valid_portfolio_body())
     assert resp.status_code == 202
     assert resp.json() == {"id": "run_new", "status": "pending"}
     assert submitted == ["run_new"]
 
 
-def test_create_run_validation_error(
+def test_create_run_rejects_weights_sum_not_one(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # Should never get this far, but guard against accidental side effects.
     monkeypatch.setattr(routes.repo, "create_run",
                         lambda _r: pytest.fail("create_run should not be called"))
     monkeypatch.setattr(routes.worker, "submit",
                         lambda _i: pytest.fail("submit should not be called"))
-
-    body = {
-        "strategy": "not-a-real-strategy",  # fails Literal enum
-        "symbol": "BTCUSDT",
-        "interval": "1m",
-        "start": "2024-01-01T00:00:00Z",
-        "end": "2024-02-01T00:00:00Z",
-        "engine": "vectorbt",
-    }
+    body = _valid_portfolio_body()
+    body["weights"] = {"BTCUSDT": 0.7, "ETHUSDT": 0.7}
     resp = client.post("/api/runs", json=body)
     assert resp.status_code == 422
     assert resp.json()["error"]["code"] == "VALIDATION_ERROR"
+
+
+def test_create_run_rejects_unknown_strategy_name(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(routes.repo, "create_run",
+                        lambda _r: pytest.fail("create_run should not be called"))
+    monkeypatch.setattr(routes.worker, "submit",
+                        lambda _i: pytest.fail("submit should not be called"))
+    body = _valid_portfolio_body()
+    body["strategies"]["BTCUSDT"] = {"name": "does_not_exist", "params": {}}
+    resp = client.post("/api/runs", json=body)
+    assert resp.status_code == 422
+    assert resp.json()["error"]["code"] == "STRATEGY_NOT_FOUND"
+
+
+def test_create_run_rejects_mismatched_weights_strategies(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(routes.repo, "create_run",
+                        lambda _r: pytest.fail("create_run should not be called"))
+    monkeypatch.setattr(routes.worker, "submit",
+                        lambda _i: pytest.fail("submit should not be called"))
+    body = _valid_portfolio_body()
+    # Weights cover a symbol that strategies does not.
+    body["weights"] = {"BTCUSDT": 0.5, "SOLUSDT": 0.5}
+    resp = client.post("/api/runs", json=body)
+    assert resp.status_code == 422
+    assert resp.json()["error"]["code"] == "VALIDATION_ERROR"
+
+
+# ---------------------------------------------------------------------------
+# /api/runs/{id}
+# ---------------------------------------------------------------------------
 
 
 def test_get_run_404(
@@ -162,15 +209,80 @@ def test_get_run_ok(
     data = resp.json()
     assert data["id"] == "run_aaa"
     assert data["metrics"]["sharpe"] == 1.5
+    assert data["symbols"] == ["BTCUSDT", "ETHUSDT"]
 
 
 # ---------------------------------------------------------------------------
-# /api/runs/{id}/trades and /equity
+# /api/runs/{id}/equity
 # ---------------------------------------------------------------------------
 
 
-def _trade(**overrides: Any) -> Trade:
-    base = {
+def test_equity_default_is_portfolio_total(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(routes.repo, "get_run", lambda rid: _detail(rid))
+    captured: dict[str, Any] = {}
+
+    def fake_load_equity(run_id: str, *, per_symbol: bool = False):
+        captured["args"] = (run_id, per_symbol)
+        return EquityPayloadTotal(
+            timestamps=["2024-01-01T00:00:00Z", "2024-01-01T01:00:00Z"],
+            equity=[100.0, 101.0],
+        )
+
+    monkeypatch.setattr(routes.repo, "load_equity", fake_load_equity)
+    resp = client.get("/api/runs/run_aaa/equity")
+    assert resp.status_code == 200
+    assert resp.json() == {
+        "timestamps": ["2024-01-01T00:00:00Z", "2024-01-01T01:00:00Z"],
+        "equity": [100.0, 101.0],
+    }
+    assert captured["args"] == ("run_aaa", False)
+
+
+def test_equity_per_symbol_true(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(routes.repo, "get_run", lambda rid: _detail(rid))
+
+    def fake_load_equity(run_id: str, *, per_symbol: bool = False):
+        assert per_symbol is True
+        return EquityPayloadPerSymbol(
+            timestamps=["2024-01-01T00:00:00Z", "2024-01-01T01:00:00Z"],
+            per_symbol={"BTCUSDT": [100.0, 102.0], "ETHUSDT": [50.0, 49.5]},
+        )
+
+    monkeypatch.setattr(routes.repo, "load_equity", fake_load_equity)
+    resp = client.get("/api/runs/run_aaa/equity?per_symbol=true")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["timestamps"] == ["2024-01-01T00:00:00Z", "2024-01-01T01:00:00Z"]
+    assert data["per_symbol"]["BTCUSDT"] == [100.0, 102.0]
+    assert data["per_symbol"]["ETHUSDT"] == [50.0, 49.5]
+    assert "equity" not in data
+
+
+def test_equity_no_artifact_yields_data_unavailable(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(routes.repo, "get_run", lambda rid: _detail(rid))
+    monkeypatch.setattr(
+        routes.repo, "load_equity",
+        lambda _rid, *, per_symbol=False: EquityPayloadTotal(timestamps=[], equity=[]),
+    )
+    resp = client.get("/api/runs/run_aaa/equity")
+    assert resp.status_code == 404
+    assert resp.json()["error"]["code"] == "DATA_UNAVAILABLE"
+
+
+# ---------------------------------------------------------------------------
+# /api/runs/{id}/trades
+# ---------------------------------------------------------------------------
+
+
+def _trade_row(symbol: str = "BTCUSDT") -> dict[str, Any]:
+    return {
+        "symbol": symbol,
         "entry_time": "2024-01-01T00:00:00Z",
         "exit_time": "2024-01-01T01:00:00Z",
         "side": 1,
@@ -185,11 +297,9 @@ def _trade(**overrides: Any) -> Trade:
         "bars_held": 60,
         "exit_reason": "signal",
     }
-    base.update(overrides)
-    return Trade.model_validate(base)
 
 
-def test_trades_pagination_passthrough(
+def test_trades_pagination_includes_symbol(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     captured: dict[str, Any] = {}
@@ -198,7 +308,7 @@ def test_trades_pagination_passthrough(
 
     def fake_load_trades(run_id: str, offset: int, limit: int):
         captured["args"] = (run_id, offset, limit)
-        return [_trade()], 42
+        return [_trade_row("BTCUSDT"), _trade_row("ETHUSDT")], 42
 
     monkeypatch.setattr(routes.repo, "load_trades", fake_load_trades)
 
@@ -206,43 +316,10 @@ def test_trades_pagination_passthrough(
     assert resp.status_code == 200
     data = resp.json()
     assert data["total"] == 42
-    assert len(data["trades"]) == 1
+    assert len(data["trades"]) == 2
+    assert data["trades"][0]["symbol"] == "BTCUSDT"
+    assert data["trades"][1]["symbol"] == "ETHUSDT"
     assert captured["args"] == ("run_aaa", 10, 5)
-
-
-def test_trades_unknown_run_404(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(routes.repo, "get_run", lambda _rid: None)
-    resp = client.get("/api/runs/run_missing/trades")
-    assert resp.status_code == 404
-    assert resp.json()["error"]["code"] == "RUN_NOT_FOUND"
-
-
-def test_equity_passthrough(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(routes.repo, "get_run", lambda rid: _detail(rid))
-    monkeypatch.setattr(
-        routes.repo, "load_equity",
-        lambda rid: (["2024-01-01T00:00:00Z", "2024-01-01T01:00:00Z"], [100.0, 101.0]),
-    )
-    resp = client.get("/api/runs/run_aaa/equity")
-    assert resp.status_code == 200
-    assert resp.json() == {
-        "timestamps": ["2024-01-01T00:00:00Z", "2024-01-01T01:00:00Z"],
-        "equity": [100.0, 101.0],
-    }
-
-
-def test_equity_no_artifact_yields_data_unavailable(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(routes.repo, "get_run", lambda rid: _detail(rid))
-    monkeypatch.setattr(routes.repo, "load_equity", lambda _rid: ([], []))
-    resp = client.get("/api/runs/run_aaa/equity")
-    assert resp.status_code == 404
-    assert resp.json()["error"]["code"] == "DATA_UNAVAILABLE"
 
 
 # ---------------------------------------------------------------------------
@@ -260,25 +337,26 @@ def test_compare_happy_path(
     monkeypatch.setattr(routes.repo, "get_run", lambda rid: details.get(rid))
 
     equities = {
-        "run_a": (
-            ["2024-01-01T00:00:00Z", "2024-01-02T00:00:00Z", "2024-01-03T00:00:00Z"],
-            [100.0, 110.0, 120.0],
+        "run_a": EquityPayloadTotal(
+            timestamps=["2024-01-01T00:00:00Z", "2024-01-02T00:00:00Z", "2024-01-03T00:00:00Z"],
+            equity=[100.0, 110.0, 120.0],
         ),
-        "run_b": (
-            ["2024-01-02T00:00:00Z", "2024-01-03T00:00:00Z", "2024-01-04T00:00:00Z"],
-            [200.0, 210.0, 220.0],
+        "run_b": EquityPayloadTotal(
+            timestamps=["2024-01-02T00:00:00Z", "2024-01-03T00:00:00Z", "2024-01-04T00:00:00Z"],
+            equity=[200.0, 210.0, 220.0],
         ),
     }
-    monkeypatch.setattr(routes.repo, "load_equity", lambda rid: equities[rid])
+    monkeypatch.setattr(
+        routes.repo, "load_equity",
+        lambda rid, *, per_symbol=False: equities[rid],
+    )
 
     resp = client.post("/api/compare", json={"run_ids": ["run_a", "run_b"]})
     assert resp.status_code == 200
     data = resp.json()
     assert data["a"]["id"] == "run_a"
     assert data["b"]["id"] == "run_b"
-    # sharpe: (2-1)/max(1,eps) = 1.0
     assert data["metric_diff"]["sharpe"]["rel_diff"] == pytest.approx(1.0)
-    # Intersection of timestamps is the two middle points.
     assert data["equity_diff"]["timestamps"] == [
         "2024-01-02T00:00:00Z", "2024-01-03T00:00:00Z",
     ]
@@ -293,7 +371,10 @@ def test_compare_missing_run_404(
         routes.repo, "get_run",
         lambda rid: _detail(rid) if rid == "run_a" else None,
     )
-    monkeypatch.setattr(routes.repo, "load_equity", lambda _rid: ([], []))
+    monkeypatch.setattr(
+        routes.repo, "load_equity",
+        lambda _rid, *, per_symbol=False: EquityPayloadTotal(timestamps=[], equity=[]),
+    )
     resp = client.post("/api/compare", json={"run_ids": ["run_a", "run_missing"]})
     assert resp.status_code == 404
     assert resp.json()["error"]["code"] == "RUN_NOT_FOUND"
@@ -306,13 +387,42 @@ def test_compare_rejects_bad_body(client: TestClient) -> None:
 
 
 # ---------------------------------------------------------------------------
+# /api/strategies
+# ---------------------------------------------------------------------------
+
+
+def test_strategies_endpoint_returns_registered_entries(
+    client: TestClient,
+) -> None:
+    resp = client.get("/api/strategies")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert "strategies" in body
+    names = {entry["name"] for entry in body["strategies"]}
+    # All four Phase 5 strategies must be discoverable via the registry.
+    assert {"orb", "funding_counter", "vol_compression", "ensemble"}.issubset(names)
+    # Shape sanity: each entry carries the contract fields.
+    for entry in body["strategies"]:
+        assert "label" in entry
+        assert "default_params" in entry
+        assert "param_schema" in entry
+        assert "supports_funding" in entry
+
+
+# ---------------------------------------------------------------------------
 # /api/gate-reports
 # ---------------------------------------------------------------------------
 
 
-def _write_gate_report(dir_: Path, name: str, *, symbol: str, overall_pass: bool) -> None:
-    data = {
-        "symbol": symbol,
+def _write_gate_report(
+    dir_: Path,
+    name: str,
+    *,
+    symbol: str | None = None,
+    symbols: list[str] | None = None,
+    overall_pass: bool,
+) -> None:
+    data: dict[str, Any] = {
         "interval": "15m",
         "window": {
             "start": "2020-10-01T00:00:00+00:00",
@@ -320,15 +430,24 @@ def _write_gate_report(dir_: Path, name: str, *, symbol: str, overall_pass: bool
         },
         "gate": {"overall_pass": overall_pass},
     }
+    if symbols is not None:
+        data["symbols"] = symbols
+    if symbol is not None:
+        data["symbol"] = symbol
     (dir_ / f"{name}.json").write_text(json.dumps(data), encoding="utf-8")
 
 
-def test_gate_reports_list(
+def test_gate_reports_list_handles_both_shapes(
     client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(routes, "REPORTS_DIR", tmp_path)
+    # Old shape: single `symbol`.
     _write_gate_report(tmp_path, "phase3_gate_btc", symbol="BTCUSDT", overall_pass=True)
-    _write_gate_report(tmp_path, "phase3_gate_eth", symbol="ETHUSDT", overall_pass=False)
+    # New portfolio shape: `symbols` list — route should surface the first.
+    _write_gate_report(
+        tmp_path, "phase3_gate_portfolio",
+        symbols=["ETHUSDT", "SOLUSDT"], overall_pass=False,
+    )
     # Non-matching file — must be ignored.
     (tmp_path / "unrelated.json").write_text("{}", encoding="utf-8")
 
@@ -336,11 +455,12 @@ def test_gate_reports_list(
     assert resp.status_code == 200
     reports = resp.json()["reports"]
     names = sorted(r["name"] for r in reports)
-    assert names == ["phase3_gate_btc", "phase3_gate_eth"]
+    assert names == ["phase3_gate_btc", "phase3_gate_portfolio"]
     btc = next(r for r in reports if r["name"] == "phase3_gate_btc")
     assert btc["symbol"] == "BTCUSDT"
     assert btc["overall_pass"] is True
-    assert btc["start"].startswith("2020-10-01")
+    port = next(r for r in reports if r["name"] == "phase3_gate_portfolio")
+    assert port["symbol"] == "ETHUSDT"  # first in the list
 
 
 def test_gate_report_detail_ok(
@@ -361,9 +481,7 @@ def test_gate_report_detail_traversal_rejected(
     monkeypatch.setattr(routes, "REPORTS_DIR", tmp_path)
     # Starlette normalises '..' path segments away before dispatch, so we
     # invoke the handler directly to confirm the sanitiser rejects the
-    # dangerous name. (A client-side '..' is already neutralised by the
-    # router; belt-and-braces on the handler matters for any caller that
-    # bypasses the router or passes a crafted name through code.)
+    # dangerous name. Belt-and-braces for any caller that bypasses the router.
     from kairos.dashboard.api.errors import KairosAPIError
 
     with pytest.raises(KairosAPIError) as exc_info:

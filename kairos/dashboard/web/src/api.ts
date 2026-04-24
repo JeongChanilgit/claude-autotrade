@@ -3,11 +3,13 @@ import type {
   CompareReport,
   CreateRunRequest,
   CreateRunResponse,
-  EquityResponse,
+  EquityResponsePerSymbol,
+  EquityResponsePortfolio,
   GateReportsResponse,
   HealthResponse,
   RunDetail,
   RunsListResponse,
+  StrategiesResponse,
   TradesResponse,
 } from "./types";
 
@@ -89,8 +91,18 @@ export function getRunTrades(
   );
 }
 
-export function getRunEquity(id: string): Promise<EquityResponse> {
-  return request<EquityResponse>(`/runs/${encodeURIComponent(id)}/equity`);
+export function getRunEquity(id: string): Promise<EquityResponsePortfolio> {
+  return request<EquityResponsePortfolio>(
+    `/runs/${encodeURIComponent(id)}/equity`,
+  );
+}
+
+export function getRunEquityPerSymbol(
+  id: string,
+): Promise<EquityResponsePerSymbol> {
+  return request<EquityResponsePerSymbol>(
+    `/runs/${encodeURIComponent(id)}/equity?per_symbol=true`,
+  );
 }
 
 export function compareRuns(runIds: [string, string]): Promise<CompareReport> {
@@ -98,6 +110,10 @@ export function compareRuns(runIds: [string, string]): Promise<CompareReport> {
     method: "POST",
     body: JSON.stringify({ run_ids: runIds }),
   });
+}
+
+export function listStrategies(): Promise<StrategiesResponse> {
+  return request<StrategiesResponse>("/strategies");
 }
 
 export function listGateReports(): Promise<GateReportsResponse> {

@@ -11,6 +11,19 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 
+# Known error codes — kept in sync with dtos.ErrorCode. STRATEGY_NOT_FOUND is
+# the Phase 5 addition, raised by /api/runs when the request references an
+# unregistered strategy name.
+KNOWN_ERROR_CODES: tuple[str, ...] = (
+    "RUN_NOT_FOUND",
+    "VALIDATION_ERROR",
+    "DATA_UNAVAILABLE",
+    "ENGINE_ERROR",
+    "INTERNAL_ERROR",
+    "STRATEGY_NOT_FOUND",
+)
+
+
 class KairosAPIError(Exception):
     """Typed REST error. ``code`` must be one of the dtos.ErrorCode literals."""
 
@@ -55,4 +68,4 @@ def register_exception_handlers(app: FastAPI) -> None:
         )
 
 
-__all__ = ["KairosAPIError", "register_exception_handlers"]
+__all__ = ["KNOWN_ERROR_CODES", "KairosAPIError", "register_exception_handlers"]

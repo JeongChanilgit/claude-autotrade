@@ -1,16 +1,19 @@
-"""Top-level backtest job entrypoint.
+"""Top-level backtest job entrypoint — portfolio form (Phase 5).
 
 Lives at module scope so the multiprocessing ``spawn`` worker can pickle and
-import it cleanly. Reads the run row via the repo, runs data load + engine
-(optionally wrapped in the RiskSimulator), writes artifacts to
-``<data_root>/run_artifacts/<run_id>/``, and updates the DB row.
+import it cleanly. Reads the run row via the repo, loads a PortfolioBars,
+builds a strategies dict and per-symbol params, runs a PortfolioEngine
+(optionally wrapped in PortfolioRiskSimulator), writes portfolio artifacts
+to ``<data_root>/run_artifacts/<run_id>/``, and updates the DB row.
 
 Progress messages are pushed into the supplied ``progress_queue`` — the
 manager-backed queue owned by ``kairos.dashboard.api.progress``.
+
+Single-symbol runs are expressed as ``weights={X: 1.0}`` on the request side;
+there is no single-symbol code path here anymore.
 """
 from __future__ import annotations
 
-import json
 import logging
 import traceback
 from decimal import Decimal
@@ -43,58 +46,41 @@ def _put(queue: Any, run_id: str, message: dict[str, Any]) -> None:
         log.exception("progress queue put failed for run %s", run_id)
 
 
-def _build_strategy(name: str) -> Any:
-    """Strategy selection mirrors the frozen CreateRunRequest enum."""
-    if name == "orb":
-        from kairos.strategies.orb import OrbStrategy
-
-        return OrbStrategy()
-    if name == "funding_counter":
-        from kairos.strategies.funding import FundingCounterStrategy
-
-        return FundingCounterStrategy()
-    if name == "vol_compression":
-        from kairos.strategies.vol_compression import VolCompressionStrategy
-
-        return VolCompressionStrategy()
-    if name == "ensemble":
-        from kairos.strategies.ensemble import build_default_ensemble
-
-        return build_default_ensemble()
-    raise ValueError(f"unknown strategy: {name!r}")
-
-
 def _build_engine(name: str) -> Any:
+    """Portfolio engine factory. The name is the one persisted on the row."""
     if name == "vectorbt":
-        from kairos.backtest.engine_vbt import VectorbtEngine
+        from kairos.backtest.engine_portfolio_vbt import PortfolioVectorbtEngine
 
-        return VectorbtEngine()
+        return PortfolioVectorbtEngine()
     if name == "backtrader":
-        from kairos.backtest.engine_bt import BacktraderEngine
+        from kairos.backtest.engine_portfolio_bt import PortfolioBacktraderEngine
 
-        return BacktraderEngine()
+        return PortfolioBacktraderEngine()
     raise ValueError(f"unknown engine: {name!r}")
 
 
-def _load_symbol_spec(symbol: str) -> Any:
+# WHY fallback spec rather than load-from-exchangeInfo: the portfolio jobs
+# path must keep running even when the exchangeInfo cache is stale. Defaults
+# below mirror kairos.backtest.gate_runner._fallback_spec; keep in sync.
+_FALLBACK_DEFAULTS: dict[str, tuple[Decimal, Decimal, Decimal, Decimal]] = {
+    "BTCUSDT": (Decimal("0.1"), Decimal("0.001"), Decimal("0.001"), Decimal("5")),
+    "ETHUSDT": (Decimal("0.01"), Decimal("0.001"), Decimal("0.001"), Decimal("5")),
+    "SOLUSDT": (Decimal("0.001"), Decimal("1"), Decimal("1"), Decimal("5")),
+}
+
+
+def _fallback_spec(symbol: str) -> Any:
     from kairos.backtest.protocols import SymbolSpec
 
-    specs_path = (
-        Path(__file__).resolve().parents[2]
-        / "backtest"
-        / "_symbol_specs.json"
+    tick, step, min_qty, min_notional = _FALLBACK_DEFAULTS.get(
+        symbol, (Decimal("0.01"), Decimal("0.001"), Decimal("0.001"), Decimal("5"))
     )
-    with specs_path.open("r", encoding="utf-8") as fh:
-        specs = json.load(fh)
-    if symbol not in specs:
-        raise ValueError(f"no symbol spec for {symbol!r}")
-    raw = specs[symbol]
     return SymbolSpec(
         symbol=symbol,
-        tick_size=Decimal(str(raw["tick_size"])),
-        step_size=Decimal(str(raw["step_size"])),
-        min_qty=Decimal(str(raw["min_qty"])),
-        min_notional=Decimal(str(raw["min_notional"])),
+        tick_size=tick,
+        step_size=step,
+        min_qty=min_qty,
+        min_notional=min_notional,
     )
 
 
@@ -106,19 +92,57 @@ def _artifacts_dir(run_id: str) -> Path:
     return d
 
 
-def _write_equity(run_id: str, equity: pd.Series) -> Path:
-    out = _artifacts_dir(run_id) / "equity.parquet"
-    ts = [pd.Timestamp(t).tz_convert("UTC").strftime("%Y-%m-%dT%H:%M:%SZ")
-          if pd.Timestamp(t).tzinfo else pd.Timestamp(t).tz_localize("UTC").strftime("%Y-%m-%dT%H:%M:%SZ")
-          for t in equity.index]
-    df = pd.DataFrame({"timestamp": ts, "equity": [float(v) for v in equity.values]})
+def _iso_utc(ts: object) -> str:
+    """Format any timestamp-ish object as ISO-8601 UTC (``...Z``)."""
+    t = pd.Timestamp(ts)
+    if t.tzinfo is None:
+        t = t.tz_localize("UTC")
+    else:
+        t = t.tz_convert("UTC")
+    return t.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _write_equity(artifacts_dir: Path, equity: pd.Series) -> Path:
+    out = artifacts_dir / "equity.parquet"
+    df = pd.DataFrame(
+        {
+            "timestamp": [_iso_utc(t) for t in equity.index],
+            "equity": [float(v) for v in equity.values],
+        }
+    )
     df.to_parquet(out, index=False)
     return out
 
 
-def _write_trades(run_id: str, trades: pd.DataFrame) -> Path:
-    out = _artifacts_dir(run_id) / "trades.parquet"
-    trades.to_parquet(out, index=False)
+def _write_equity_per_symbol(
+    artifacts_dir: Path, per_symbol: dict[str, pd.Series]
+) -> Path:
+    """Wide frame: timestamp + one column per symbol."""
+    out = artifacts_dir / "equity_per_symbol.parquet"
+    if not per_symbol:
+        df = pd.DataFrame({"timestamp": []})
+        df.to_parquet(out, index=False)
+        return out
+    # Union index across all symbols — in practice engines return identical
+    # indexes, but be defensive so a per-symbol re-slice doesn't corrupt output.
+    first_idx = next(iter(per_symbol.values())).index
+    data: dict[str, list[Any]] = {"timestamp": [_iso_utc(t) for t in first_idx]}
+    for sym in sorted(per_symbol.keys()):
+        series = per_symbol[sym].reindex(first_idx)
+        data[sym] = [float(v) for v in series.values]
+    df = pd.DataFrame(data)
+    df.to_parquet(out, index=False)
+    return out
+
+
+def _write_trades(artifacts_dir: Path, trades: pd.DataFrame) -> Path:
+    """Write trades preserving the leading ``symbol`` column."""
+    out = artifacts_dir / "trades.parquet"
+    df = trades.copy()
+    if "symbol" in df.columns:
+        cols = ["symbol"] + [c for c in df.columns if c != "symbol"]
+        df = df[cols]
+    df.to_parquet(out, index=False)
     return out
 
 
@@ -128,10 +152,14 @@ def _write_trades(run_id: str, trades: pd.DataFrame) -> Path:
 
 
 def run_backtest_job(run_id: str, progress_queue: Any) -> None:
-    """Top-level pool target. Must be importable + picklable."""
+    """Top-level pool target. Must be importable + picklable.
+
+    Exceptions are swallowed and surfaced via repo.mark_failed + a progress
+    ``error`` message so the worker pool keeps running the next job.
+    """
     try:
         _put(progress_queue, run_id, {
-            "type": "progress", "pct": 0.0, "stage": "load_row",
+            "type": "progress", "pct": 0.0, "stage": "load",
             "log": "loading run row",
         })
         detail = repo.get_run(run_id)
@@ -139,75 +167,86 @@ def run_backtest_job(run_id: str, progress_queue: Any) -> None:
             raise RuntimeError(f"run {run_id!r} not found in DB")
 
         repo.mark_running(run_id)
-        _put(progress_queue, run_id, {
-            "type": "progress", "pct": 5.0, "stage": "load_data",
-            "log": f"loading bars for {detail.symbol} {detail.interval}",
-        })
 
-        from kairos.data.load import load_bars
+        from kairos.data.load import load_portfolio
 
-        start_ts = pd.Timestamp(detail.start).tz_convert("UTC") if pd.Timestamp(
-            detail.start
-        ).tzinfo else pd.Timestamp(detail.start).tz_localize("UTC")
-        end_ts = pd.Timestamp(detail.end).tz_convert("UTC") if pd.Timestamp(
-            detail.end
-        ).tzinfo else pd.Timestamp(detail.end).tz_localize("UTC")
+        start_ts = pd.Timestamp(detail.start)
+        if start_ts.tzinfo is None:
+            start_ts = start_ts.tz_localize("UTC")
+        else:
+            start_ts = start_ts.tz_convert("UTC")
+        end_ts = pd.Timestamp(detail.end)
+        if end_ts.tzinfo is None:
+            end_ts = end_ts.tz_localize("UTC")
+        else:
+            end_ts = end_ts.tz_convert("UTC")
 
-        data = load_bars(detail.symbol, detail.interval, start_ts, end_ts)
-        _put(progress_queue, run_id, {
-            "type": "progress", "pct": 25.0, "stage": "engine_start",
-            "log": f"engine={detail.engine} strategy={detail.strategy}",
-        })
+        weights = {str(k): float(v) for k, v in detail.weights.items()}
+        symbols = sorted(weights.keys())
 
-        strategy = _build_strategy(detail.strategy)
+        portfolio = load_portfolio(
+            symbols=symbols,
+            interval=detail.interval,  # type: ignore[arg-type]
+            start=start_ts,
+            end=end_ts,
+            weights=weights,
+        )
+
+        # detail.strategies is dict[symbol, name]; params live on
+        # detail.strategy_params (dict[symbol, dict]).
+        from kairos.strategies import registry
+
+        strategies: dict[str, Any] = {}
+        params: dict[str, Any] = {}
+        for sym in symbols:
+            name = detail.strategies[sym]
+            strategies[sym] = registry.build(name)
+            params[sym] = dict(detail.strategy_params.get(sym, {}))
+
+        symbol_specs = {sym: _fallback_spec(sym) for sym in symbols}
+
         base_engine = _build_engine(detail.engine)
-        symbol_spec = _load_symbol_spec(detail.symbol)
 
         from kairos.backtest.protocols import CostModel
 
-        params = dict(detail.params)
-
         if detail.apply_risk_simulator:
             from kairos.backtest.protocols import RiskRules
-            from kairos.backtest.risk_simulator import RiskSimulator
+            from kairos.backtest.risk_simulator import PortfolioRiskSimulator
 
-            runner = RiskSimulator(base_engine, RiskRules())
+            runner: Any = PortfolioRiskSimulator(base_engine, RiskRules())
         else:
             runner = base_engine
 
+        _put(progress_queue, run_id, {
+            "type": "progress", "pct": 30.0, "stage": "run",
+            "log": f"engine={detail.engine} symbols={symbols}",
+        })
+
         result = runner.run(
-            strategy=strategy,
-            data=data,
+            strategies=strategies,
+            portfolio=portfolio,
             params=params,
             costs=CostModel(),
-            symbol_spec=symbol_spec,
+            symbol_specs=symbol_specs,
             initial_cash=Decimal(str(detail.initial_cash)),
         )
 
-        _put(progress_queue, run_id, {
-            "type": "progress", "pct": 80.0, "stage": "engine_done",
-            "log": f"{len(result.trades)} trades",
-        })
-
-        _put(progress_queue, run_id, {
-            "type": "progress", "pct": 90.0, "stage": "metrics",
-            "log": "metrics computed",
-        })
-
         artifacts_dir = _artifacts_dir(run_id)
-        _write_equity(run_id, result.equity_curve)
-        _write_trades(run_id, result.trades)
-
-        _put(progress_queue, run_id, {
-            "type": "progress", "pct": 95.0, "stage": "artifacts",
-            "log": "artifacts written",
-        })
+        _write_equity(artifacts_dir, result.equity_curve)
+        _write_equity_per_symbol(artifacts_dir, dict(result.per_symbol_equity))
+        _write_trades(artifacts_dir, result.trades)
 
         metrics = {str(k): float(v) for k, v in result.metrics.items()}
+        per_symbol_metrics = {
+            str(sym): {str(k): float(v) for k, v in m.items()}
+            for sym, m in result.per_symbol_metrics.items()
+        }
+
         repo.mark_done(
             run_id,
             metrics=metrics,
-            equity_path=str(artifacts_dir),
+            per_symbol_metrics=per_symbol_metrics,
+            artifacts_dir=str(artifacts_dir),
             trades_count=int(len(result.trades)),
         )
         _put(progress_queue, run_id, {

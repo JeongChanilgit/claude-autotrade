@@ -1,16 +1,28 @@
-// DTOs copied verbatim from docs/phase4/API.md
+// DTOs copied verbatim from docs/phase5/API_V2.md (portfolio mode).
+
+export type IntervalName = "1m" | "15m";
+export type EngineName = "vectorbt" | "backtrader";
+export type RunStatus = "pending" | "running" | "done" | "failed";
+export type ExitReason =
+  | "signal"
+  | "stop"
+  | "target"
+  | "eod_flatten"
+  | "risk_halt";
+export type ParamFieldType = "int" | "float" | "bool" | "string" | "enum";
 
 export interface RunSummary {
   id: string;
-  strategy: string;
-  symbol: string;
+  symbols: string[];
+  strategies: Record<string, string>;
+  weights: Record<string, number>;
   interval: string;
   start: string;
   end: string;
-  engine: "vectorbt" | "backtrader";
-  status: "pending" | "running" | "done" | "failed";
+  engine: EngineName;
+  status: RunStatus;
   created_at: string;
-  // present only when status === "done"
+  // Populated only when status === "done".
   cagr?: number;
   mdd?: number;
   sharpe?: number;
@@ -18,14 +30,16 @@ export interface RunSummary {
 }
 
 export interface RunDetail extends RunSummary {
-  params: Record<string, unknown>;
+  strategy_params: Record<string, Record<string, unknown>>;
   initial_cash: number;
   apply_risk_simulator: boolean;
-  metrics: Record<string, number> | null; // null while pending/running
-  error?: string; // present iff status==="failed"
+  metrics: Record<string, number> | null;
+  per_symbol_metrics: Record<string, Record<string, number>> | null;
+  error?: string;
 }
 
 export interface Trade {
+  symbol: string;
   entry_time: string;
   exit_time: string;
   side: 1 | -1;
@@ -38,7 +52,7 @@ export interface Trade {
   funding_cost: number;
   net_pnl: number;
   bars_held: number;
-  exit_reason: "signal" | "stop" | "target" | "eod_flatten" | "risk_halt";
+  exit_reason: ExitReason;
 }
 
 export interface CompareReport {
@@ -49,15 +63,17 @@ export interface CompareReport {
 }
 
 export interface GateReportSummary {
-  name: string; // filename stem, no extension
-  symbol: string;
+  // Filename stem without extension.
+  name: string;
+  // Portfolio reports expose a list of symbols; older single-symbol reports
+  // expose one `symbol` string. Both are optional so pages can render either.
+  symbols?: string[];
+  symbol?: string;
   interval: string;
   start: string;
   end: string;
   overall_pass: boolean;
 }
-
-// Non-DTO auxiliary types used by api/ws clients.
 
 export interface ApiErrorBody {
   error: { code: string; message: string };
@@ -77,23 +93,50 @@ export interface TradesResponse {
   total: number;
 }
 
-export interface EquityResponse {
+export interface EquityResponsePortfolio {
   timestamps: string[];
   equity: number[];
+}
+
+export interface EquityResponsePerSymbol {
+  timestamps: string[];
+  per_symbol: Record<string, number[]>;
 }
 
 export interface GateReportsResponse {
   reports: GateReportSummary[];
 }
 
+export interface ParamField {
+  type: ParamFieldType;
+  default: unknown;
+  min?: number;
+  max?: number;
+  choices?: string[];
+  help: string;
+}
+
+export interface StrategyEntry {
+  name: string;
+  label: string;
+  default_params: Record<string, unknown>;
+  param_schema: Record<string, ParamField>;
+  supports_funding: boolean;
+  supports_metrics: boolean;
+  description: string;
+}
+
+export interface StrategiesResponse {
+  strategies: StrategyEntry[];
+}
+
 export interface CreateRunRequest {
-  strategy: "orb" | "funding_counter" | "vol_compression" | "ensemble";
-  symbol: string;
-  interval: "1m" | "15m";
+  strategies: Record<string, { name: string; params: Record<string, unknown> }>;
+  weights: Record<string, number>;
+  interval: IntervalName;
   start: string;
   end: string;
-  engine: "vectorbt" | "backtrader";
-  params: Record<string, unknown>;
+  engine: EngineName;
   initial_cash: number;
   apply_risk_simulator: boolean;
 }

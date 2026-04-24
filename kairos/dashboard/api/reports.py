@@ -1,11 +1,12 @@
-"""PDF report export for the Kairos dashboard.
+"""PDF report export for the Kairos dashboard — Phase 5 portfolio shape.
 
 Exposes ``reports_router`` with ``GET /api/runs/{id}/report.pdf`` — renders a
-small one-or-two-page PDF summarising a run's metrics and equity curve.
+small one-or-two-page PDF summarising a portfolio run's metrics and equity curve.
 
 The PDF build is intentionally minimal:
   * matplotlib renders the equity curve to a PNG buffer (Agg backend, no GUI).
-  * reportlab stitches a cover page + metrics table + the PNG into the doc.
+  * reportlab stitches a cover page + symbols/weights table + metrics table +
+    the PNG into the doc.
 
 No side effects on disk — everything is buffered in memory and streamed back.
 """
@@ -90,6 +91,22 @@ def _equity_png(timestamps: list[str], equity: list[float]) -> bytes:
     return buf.getvalue()
 
 
+def _attr_or_key(obj: Any, name: str, default: Any = None) -> Any:
+    # Repo returns Pydantic models; tests may hand in plain dicts. Accept both.
+    if hasattr(obj, name):
+        return getattr(obj, name)
+    if isinstance(obj, dict):
+        return obj.get(name, default)
+    return default
+
+
+def _extract_equity(payload: Any) -> tuple[list[str], list[float]]:
+    """Normalise repo.load_equity return into (timestamps, equity) tuples."""
+    ts = _attr_or_key(payload, "timestamps", None) or []
+    eq = _attr_or_key(payload, "equity", None) or []
+    return list(ts), [float(x) for x in eq]
+
+
 def _build_pdf(detail: Any, timestamps: list[str], equity: list[float]) -> bytes:
     """Render the report PDF into an in-memory bytes buffer."""
     styles = getSampleStyleSheet()
@@ -108,10 +125,17 @@ def _build_pdf(detail: Any, timestamps: list[str], equity: list[float]) -> bytes
     story.append(Paragraph("Kairos Backtest Report", styles["Title"]))
     story.append(Spacer(1, 0.15 * inch))
 
+    symbols = getattr(detail, "symbols", None) or []
+    # `strategies` on RunSummary/RunDetail is dict[symbol, strategy_name].
+    strategies_map = getattr(detail, "strategies", None) or {}
+    if isinstance(strategies_map, dict):
+        strategy_names = sorted({str(v) for v in strategies_map.values()})
+    else:
+        strategy_names = []
     cover_rows = [
         ["Run ID", str(getattr(detail, "id", ""))],
-        ["Strategy", str(getattr(detail, "strategy", ""))],
-        ["Symbol", str(getattr(detail, "symbol", ""))],
+        ["Strategies", ", ".join(strategy_names) if strategy_names else "-"],
+        ["Symbols", ", ".join(str(s) for s in symbols) if symbols else "-"],
         ["Interval", str(getattr(detail, "interval", ""))],
         ["Window",
          f"{getattr(detail, 'start', '')}  ->  {getattr(detail, 'end', '')}"],
@@ -134,7 +158,34 @@ def _build_pdf(detail: Any, timestamps: list[str], equity: list[float]) -> bytes
         )
     )
     story.append(cover)
-    story.append(Spacer(1, 0.25 * inch))
+    story.append(Spacer(1, 0.2 * inch))
+
+    # Portfolio breakdown: symbol -> weight. Sorted for deterministic output.
+    weights = getattr(detail, "weights", None) or {}
+    if isinstance(weights, dict) and weights:
+        story.append(Paragraph("Portfolio Weights", styles["Heading2"]))
+        weight_rows: list[list[str]] = [["Symbol", "Weight"]]
+        for sym in sorted(weights.keys()):
+            try:
+                pct = f"{float(weights[sym]) * 100:.2f}%"
+            except (TypeError, ValueError):
+                pct = "-"
+            weight_rows.append([str(sym), pct])
+        wtab = Table(weight_rows, colWidths=[2.8 * inch, 2.0 * inch])
+        wtab.setStyle(
+            TableStyle(
+                [
+                    ("FONT", (0, 0), (-1, -1), "Helvetica", 10),
+                    ("FONT", (0, 0), (-1, 0), "Helvetica-Bold", 10),
+                    ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
+                    ("BOX", (0, 0), (-1, -1), 0.5, colors.grey),
+                    ("INNERGRID", (0, 0), (-1, -1), 0.25, colors.lightgrey),
+                    ("ALIGN", (1, 1), (1, -1), "RIGHT"),
+                ]
+            )
+        )
+        story.append(wtab)
+        story.append(Spacer(1, 0.2 * inch))
 
     story.append(Paragraph("Metrics", styles["Heading2"]))
     metrics = getattr(detail, "metrics", None) or {}
@@ -174,7 +225,8 @@ def get_run_report_pdf(run_id: str) -> Response:
     # Equity may be absent for still-running or failed runs — render a stub
     # rather than 404'ing the whole PDF; metadata alone is still useful.
     try:
-        ts, eq = repo.load_equity(run_id)
+        payload = repo.load_equity(run_id, per_symbol=False)
+        ts, eq = _extract_equity(payload)
     except Exception:
         ts, eq = [], []
 

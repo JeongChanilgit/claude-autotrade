@@ -1,7 +1,7 @@
-"""REST routes for the Kairos dashboard.
+"""REST routes for the Kairos dashboard — Phase 5 portfolio shape.
 
-Exposes ``api_router`` under the ``/api`` prefix. Every endpoint shape is
-pinned by docs/phase4/API.md; see dtos.py for the frozen Pydantic models.
+Every endpoint shape is pinned by docs/phase5/API_V2.md; see dtos.py for the
+frozen Pydantic models and repo.py for the backing storage contracts.
 """
 from __future__ import annotations
 
@@ -12,18 +12,22 @@ from typing import Any
 from fastapi import APIRouter, Query, status
 from fastapi.responses import JSONResponse
 
-from kairos.dashboard.api import progress, repo, worker
+from kairos.dashboard.api import progress, repo, worker  # noqa: F401  (progress kept for parity)
 from kairos.dashboard.api.dtos import (
     CompareReport,
-    CreateRunRequest,
+    CreatePortfolioRunRequest,
     EquityDiff,
+    EquityPayloadPerSymbol,
+    EquityPayloadTotal,
     GateReportSummary,
     MetricDiff,
+    ParamField,
     RunDetail,
-    RunStatus,
     RunSummary,
+    StrategyEntry,
 )
 from kairos.dashboard.api.errors import KairosAPIError
+from kairos.strategies import registry as strategy_registry
 
 api_router = APIRouter(prefix="/api")
 
@@ -54,7 +58,18 @@ def list_runs(
 
 
 @api_router.post("/runs", status_code=status.HTTP_202_ACCEPTED)
-def create_run(req: CreateRunRequest) -> dict[str, str]:
+def create_run(req: CreatePortfolioRunRequest) -> dict[str, str]:
+    # Pre-flight: every referenced strategy name must be registered, otherwise
+    # the worker would crash deep in dispatch with a less helpful error.
+    for symbol, spec in req.strategies.items():
+        try:
+            strategy_registry.get(spec.name)
+        except KeyError as exc:
+            raise KairosAPIError(
+                "STRATEGY_NOT_FOUND",
+                f"unknown strategy {spec.name!r} for symbol {symbol!r}",
+                status=422,
+            ) from exc
     run_id = repo.create_run(req)
     worker.submit(run_id)
     return {"id": run_id, "status": "pending"}
@@ -83,26 +98,31 @@ def get_trades(
 
 
 @api_router.get("/runs/{run_id}/equity")
-def get_equity(run_id: str) -> dict[str, list[Any]]:
+def get_equity(
+    run_id: str,
+    per_symbol: bool = Query(False),
+) -> dict[str, Any]:
     if repo.get_run(run_id) is None:
         raise KairosAPIError("RUN_NOT_FOUND", f"run {run_id!r} not found", status=404)
-    ts, eq = repo.load_equity(run_id)
+    payload = repo.load_equity(run_id, per_symbol=per_symbol)
+    ts = _payload_timestamps(payload)
     if not ts:
         raise KairosAPIError(
             "DATA_UNAVAILABLE",
             f"no equity artifact for run {run_id!r}",
             status=404,
         )
-    return {"timestamps": ts, "equity": eq}
+    if per_symbol:
+        return {
+            "timestamps": ts,
+            "per_symbol": _payload_per_symbol(payload),
+        }
+    return {"timestamps": ts, "equity": _payload_equity(payload)}
 
 
 # ---------------------------------------------------------------------------
 # Compare
 # ---------------------------------------------------------------------------
-
-
-class _CompareBody(dict):
-    """Placeholder for typing only; real validation happens in the handler."""
 
 
 def _metric_diff(a: dict[str, Any], b: dict[str, Any]) -> dict[str, MetricDiff]:
@@ -146,6 +166,35 @@ def _summary_of(detail: RunDetail) -> RunSummary:
     return RunSummary(**{k: getattr(detail, k) for k in RunSummary.model_fields})
 
 
+def _payload_timestamps(payload: Any) -> list[str]:
+    # repo returns Pydantic models, but tolerate dicts/tuples from legacy tests.
+    if hasattr(payload, "timestamps"):
+        return list(payload.timestamps)
+    if isinstance(payload, dict):
+        return list(payload.get("timestamps") or [])
+    if isinstance(payload, tuple) and len(payload) == 2:
+        return list(payload[0])
+    return []
+
+
+def _payload_equity(payload: Any) -> list[float]:
+    if hasattr(payload, "equity"):
+        return list(payload.equity)
+    if isinstance(payload, dict) and "equity" in payload:
+        return list(payload["equity"])
+    if isinstance(payload, tuple) and len(payload) == 2:
+        return list(payload[1])
+    return []
+
+
+def _payload_per_symbol(payload: Any) -> dict[str, list[float]]:
+    if hasattr(payload, "per_symbol"):
+        return {k: list(v) for k, v in payload.per_symbol.items()}
+    if isinstance(payload, dict) and "per_symbol" in payload:
+        return {k: list(v) for k, v in payload["per_symbol"].items()}
+    return {}
+
+
 @api_router.post("/compare")
 def compare(body: dict[str, Any]) -> CompareReport:
     ids = body.get("run_ids")
@@ -170,8 +219,10 @@ def compare(body: dict[str, Any]) -> CompareReport:
     mdiff = _metric_diff(a_metrics, b_metrics)
 
     # Equity curves may be missing while still pending/running — treat as empty.
-    ts_a, eq_a = repo.load_equity(a_id)
-    ts_b, eq_b = repo.load_equity(b_id)
+    pa = repo.load_equity(a_id, per_symbol=False)
+    pb = repo.load_equity(b_id, per_symbol=False)
+    ts_a, eq_a = _payload_timestamps(pa), _payload_equity(pa)
+    ts_b, eq_b = _payload_timestamps(pb), _payload_equity(pb)
     ediff = _equity_intersection(ts_a, eq_a, ts_b, eq_b)
 
     return CompareReport(
@@ -183,12 +234,53 @@ def compare(body: dict[str, Any]) -> CompareReport:
 
 
 # ---------------------------------------------------------------------------
+# Strategies
+# ---------------------------------------------------------------------------
+
+
+def _entry_to_dto(entry: Any) -> StrategyEntry:
+    # Convert registry's dataclass ParamField -> Pydantic ParamField. The
+    # registry dataclass uses a tuple for `choices`; normalise to list for JSON.
+    schema = {}
+    for key, field in entry.param_schema.items():
+        schema[key] = ParamField(
+            type=field.type,
+            default=field.default,
+            min=field.min,
+            max=field.max,
+            choices=list(field.choices) if field.choices is not None else None,
+            help=field.help,
+        )
+    return StrategyEntry(
+        name=entry.name,
+        label=entry.label,
+        default_params=dict(entry.default_params),
+        param_schema=schema,
+        supports_funding=entry.supports_funding,
+        supports_metrics=entry.supports_metrics,
+        description=entry.description,
+    )
+
+
+@api_router.get("/strategies")
+def list_strategies() -> dict[str, list[StrategyEntry]]:
+    entries = [_entry_to_dto(e) for e in strategy_registry.all_entries()]
+    return {"strategies": entries}
+
+
+# ---------------------------------------------------------------------------
 # Gate reports
 # ---------------------------------------------------------------------------
 
 
 def _gate_summary(name: str, data: dict[str, Any]) -> GateReportSummary:
-    symbol = str(data.get("symbol", ""))
+    # New portfolio gate reports use a `symbols` list; old single-symbol ones
+    # use a `symbol` string. Render the first symbol for list-view compactness.
+    symbols = data.get("symbols")
+    if isinstance(symbols, list) and symbols:
+        symbol = str(symbols[0])
+    else:
+        symbol = str(data.get("symbol", ""))
     interval = str(data.get("interval", ""))
     # gate_runner emits window.{start,end}; fall back to top-level for forward
     # compatibility with a flatter schema.

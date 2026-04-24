@@ -1,13 +1,30 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
+import {
+  Area,
+  AreaChart,
+  CartesianGrid,
+  Legend,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from "recharts";
 import DrawdownChart from "../components/DrawdownChart";
 import EquityChart from "../components/EquityChart";
 import MetricCard from "../components/MetricCard";
 import ProgressBar from "../components/ProgressBar";
 import * as api from "../api";
 import { useAppStore } from "../store";
-import type { EquityResponse, RunSummary } from "../types";
+import type {
+  EquityResponsePerSymbol,
+  EquityResponsePortfolio,
+  RunDetail,
+  RunSummary,
+} from "../types";
 import { useBacktestProgress } from "../ws";
+
+type FormatKind = "pct" | "num3" | "int";
 
 // Metric keys whose presence we surface as cards. Missing keys render as em-dash.
 const METRIC_KEYS: Array<{ key: string; label: string; kind: FormatKind }> = [
@@ -20,7 +37,19 @@ const METRIC_KEYS: Array<{ key: string; label: string; kind: FormatKind }> = [
   { key: "total_trades", label: "Total Trades", kind: "int" },
 ];
 
-type FormatKind = "pct" | "num3" | "int";
+// 10-color palette for per-symbol stacked area. Tailwind-derived hex codes.
+const SYMBOL_COLORS: string[] = [
+  "#10b981", // emerald-500
+  "#0ea5e9", // sky-500
+  "#f59e0b", // amber-500
+  "#f43f5e", // rose-500
+  "#8b5cf6", // violet-500
+  "#84cc16", // lime-500
+  "#f97316", // orange-500
+  "#6366f1", // indigo-500
+  "#d946ef", // fuchsia-500
+  "#14b8a6", // teal-500
+];
 
 function formatMetric(
   metrics: Record<string, number> | null,
@@ -35,6 +64,37 @@ function formatMetric(
   return v.toFixed(3);
 }
 
+function formatCellMetric(v: number | undefined, kind: FormatKind): string {
+  if (v == null || Number.isNaN(v)) return "—";
+  if (kind === "pct") return `${(v * 100).toFixed(2)}%`;
+  if (kind === "int") return String(Math.round(v));
+  return v.toFixed(3);
+}
+
+function arraysEqualUnordered(a: string[], b: string[]): boolean {
+  if (a.length !== b.length) return false;
+  const sa = [...a].sort();
+  const sb = [...b].sort();
+  for (let i = 0; i < sa.length; i += 1) {
+    if (sa[i] !== sb[i]) return false;
+  }
+  return true;
+}
+
+function recordsEqual<V>(
+  a: Record<string, V>,
+  b: Record<string, V>,
+): boolean {
+  const ka = Object.keys(a).sort();
+  const kb = Object.keys(b).sort();
+  if (ka.length !== kb.length) return false;
+  for (let i = 0; i < ka.length; i += 1) {
+    if (ka[i] !== kb[i]) return false;
+    if (a[ka[i]] !== b[kb[i]]) return false;
+  }
+  return true;
+}
+
 function siblingOf(runs: RunSummary[], me: RunSummary): RunSummary | null {
   const other = me.engine === "vectorbt" ? "backtrader" : "vectorbt";
   return (
@@ -43,11 +103,12 @@ function siblingOf(runs: RunSummary[], me: RunSummary): RunSummary | null {
         r.id !== me.id &&
         r.engine === other &&
         r.status === "done" &&
-        r.strategy === me.strategy &&
-        r.symbol === me.symbol &&
         r.interval === me.interval &&
         r.start === me.start &&
-        r.end === me.end,
+        r.end === me.end &&
+        arraysEqualUnordered(r.symbols, me.symbols) &&
+        recordsEqual(r.strategies, me.strategies) &&
+        recordsEqual(r.weights, me.weights),
     ) ?? null
   );
 }
@@ -68,7 +129,9 @@ export default function RunResults() {
   const loadRun = useAppStore((s) => s.loadRun);
   const refreshRuns = useAppStore((s) => s.refreshRuns);
 
-  const [equity, setEquity] = useState<EquityResponse | null>(null);
+  const [equity, setEquity] = useState<EquityResponsePortfolio | null>(null);
+  const [equityPerSymbol, setEquityPerSymbol] =
+    useState<EquityResponsePerSymbol | null>(null);
   const [equityError, setEquityError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -87,10 +150,11 @@ export default function RunResults() {
     if (!id) return;
     if (run?.status !== "done") return;
     let cancelled = false;
-    api
-      .getRunEquity(id)
-      .then((res) => {
-        if (!cancelled) setEquity(res);
+    Promise.all([api.getRunEquity(id), api.getRunEquityPerSymbol(id)])
+      .then(([total, perSym]) => {
+        if (cancelled) return;
+        setEquity(total);
+        setEquityPerSymbol(perSym);
       })
       .catch((err: unknown) => {
         if (!cancelled) {
@@ -137,7 +201,7 @@ export default function RunResults() {
         <>
           <section className="flex flex-col gap-3">
             <h2 className="text-sm uppercase tracking-wider text-slate-400">
-              Metrics
+              Portfolio metrics
             </h2>
             <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-3">
               {METRIC_KEYS.map((m) => (
@@ -150,11 +214,15 @@ export default function RunResults() {
             </div>
           </section>
 
+          {run.per_symbol_metrics && (
+            <PerSymbolMetrics metrics={run.per_symbol_metrics} />
+          )}
+
           {sibling && <SiblingCompare me={run} other={sibling} />}
 
           <section className="flex flex-col gap-3">
             <h2 className="text-sm uppercase tracking-wider text-slate-400">
-              Equity Curve
+              Portfolio equity curve
             </h2>
             {equityError && (
               <div className="text-sm text-red-400">{equityError}</div>
@@ -169,6 +237,15 @@ export default function RunResults() {
               />
             )}
           </section>
+
+          {equityPerSymbol && (
+            <section className="flex flex-col gap-3">
+              <h2 className="text-sm uppercase tracking-wider text-slate-400">
+                Per-symbol equity (stacked)
+              </h2>
+              <PerSymbolEquityChart data={equityPerSymbol} />
+            </section>
+          )}
 
           {equity && (
             <section className="flex flex-col gap-3">
@@ -196,17 +273,20 @@ export default function RunResults() {
   );
 }
 
-function Header({ run }: { run: RunSummary }) {
+function Header({ run }: { run: RunDetail }) {
+  const symbolRows = run.symbols.map((sym) => ({
+    symbol: sym,
+    strategy: run.strategies[sym] ?? "—",
+    weight: run.weights[sym],
+  }));
   return (
-    <div className="flex flex-col gap-1">
+    <div className="flex flex-col gap-3">
       <div className="flex items-center gap-3">
-        <h1 className="text-2xl font-semibold tracking-tight">
-          {run.strategy}
-        </h1>
+        <h1 className="text-2xl font-semibold tracking-tight">Portfolio run</h1>
         <StatusPill status={run.status} />
       </div>
       <div className="text-sm text-slate-400">
-        <span className="font-mono">{run.symbol}</span>
+        <span className="font-mono">{run.symbols.join(", ")}</span>
         <span className="mx-2 text-slate-600">·</span>
         <span>{run.interval}</span>
         <span className="mx-2 text-slate-600">·</span>
@@ -215,6 +295,21 @@ function Header({ run }: { run: RunSummary }) {
         </span>
         <span className="mx-2 text-slate-600">·</span>
         <span>engine: {run.engine}</span>
+      </div>
+      <div className="border border-slate-800 rounded bg-slate-900 inline-block w-fit">
+        <table className="text-sm font-mono">
+          <tbody>
+            {symbolRows.map((r) => (
+              <tr key={r.symbol} className="border-b border-slate-800 last:border-0">
+                <td className="px-3 py-1.5 text-slate-200">{r.symbol}</td>
+                <td className="px-3 py-1.5 text-slate-300">{r.strategy}</td>
+                <td className="px-3 py-1.5 text-slate-400">
+                  weight {r.weight != null ? r.weight.toFixed(2) : "—"}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
       </div>
     </div>
   );
@@ -243,6 +338,118 @@ function RunProgress({ runId }: { runId: string }) {
     <div className="flex flex-col gap-2">
       <ProgressBar pct={p.pct} stage={p.stage} lastLog={lastLog} />
       {p.error && <div className="text-sm text-red-400">{p.error}</div>}
+    </div>
+  );
+}
+
+const PER_SYMBOL_COLUMNS: Array<{
+  key: string;
+  label: string;
+  kind: FormatKind;
+}> = [
+  { key: "cagr", label: "CAGR", kind: "pct" },
+  { key: "mdd", label: "MDD", kind: "pct" },
+  { key: "sharpe", label: "Sharpe", kind: "num3" },
+  { key: "total_trades", label: "Trades", kind: "int" },
+];
+
+function PerSymbolMetrics({
+  metrics,
+}: {
+  metrics: Record<string, Record<string, number>>;
+}) {
+  const symbols = Object.keys(metrics).sort();
+  return (
+    <section className="flex flex-col gap-3">
+      <h2 className="text-sm uppercase tracking-wider text-slate-400">
+        Per-symbol metrics
+      </h2>
+      <div className="border border-slate-800 rounded bg-slate-900 overflow-hidden">
+        <table className="w-full text-sm font-mono">
+          <thead className="text-xs text-slate-400 bg-slate-950">
+            <tr>
+              <th className="text-left px-4 py-2">Symbol</th>
+              {PER_SYMBOL_COLUMNS.map((c) => (
+                <th key={c.key} className="text-right px-4 py-2">
+                  {c.label}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {symbols.map((sym) => {
+              const row = metrics[sym] ?? {};
+              return (
+                <tr key={sym} className="border-t border-slate-800">
+                  <td className="px-4 py-1.5 text-slate-200">{sym}</td>
+                  {PER_SYMBOL_COLUMNS.map((c) => (
+                    <td
+                      key={c.key}
+                      className="px-4 py-1.5 text-right text-slate-300"
+                    >
+                      {formatCellMetric(row[c.key], c.kind)}
+                    </td>
+                  ))}
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
+function PerSymbolEquityChart({ data }: { data: EquityResponsePerSymbol }) {
+  const symbols = Object.keys(data.per_symbol).sort();
+  const rows = data.timestamps.map((t, i) => {
+    const entry: Record<string, string | number> = { t };
+    for (const sym of symbols) {
+      const series = data.per_symbol[sym] ?? [];
+      entry[sym] = series[i] ?? 0;
+    }
+    return entry;
+  });
+  return (
+    <div style={{ width: "100%", height: 320 }}>
+      <ResponsiveContainer>
+        <AreaChart
+          data={rows}
+          margin={{ top: 8, right: 16, bottom: 8, left: 8 }}
+        >
+          <CartesianGrid stroke="#1e293b" strokeDasharray="3 3" />
+          <XAxis
+            dataKey="t"
+            stroke="#64748b"
+            tick={{ fontSize: 11 }}
+            minTickGap={40}
+          />
+          <YAxis stroke="#64748b" tick={{ fontSize: 11 }} />
+          <Tooltip
+            contentStyle={{
+              background: "#0f172a",
+              border: "1px solid #1e293b",
+              color: "#e2e8f0",
+            }}
+          />
+          <Legend />
+          {symbols.map((sym, i) => {
+            const color = SYMBOL_COLORS[i % SYMBOL_COLORS.length];
+            return (
+              <Area
+                key={sym}
+                type="monotone"
+                dataKey={sym}
+                name={sym}
+                stackId="1"
+                stroke={color}
+                fill={color}
+                fillOpacity={0.55}
+              />
+            );
+          })}
+        </AreaChart>
+      </ResponsiveContainer>
     </div>
   );
 }

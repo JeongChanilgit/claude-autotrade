@@ -1,6 +1,11 @@
 import { create } from "zustand";
 import * as api from "./api";
-import type { GateReportSummary, RunDetail, RunSummary } from "./types";
+import type {
+  GateReportSummary,
+  RunDetail,
+  RunSummary,
+  StrategyEntry,
+} from "./types";
 
 export interface AppStore {
   runs: RunSummary[];
@@ -16,6 +21,10 @@ export interface AppStore {
 
   gateReports: GateReportSummary[];
   refreshGateReports: () => Promise<void>;
+
+  strategies: StrategyEntry[];
+  strategiesLoaded: boolean;
+  refreshStrategies: () => Promise<void>;
 }
 
 export const useAppStore = create<AppStore>((set) => ({
@@ -40,5 +49,12 @@ export const useAppStore = create<AppStore>((set) => ({
   refreshGateReports: async () => {
     const res = await api.listGateReports();
     set({ gateReports: res.reports });
+  },
+
+  strategies: [],
+  strategiesLoaded: false,
+  refreshStrategies: async () => {
+    const res = await api.listStrategies();
+    set({ strategies: res.strategies, strategiesLoaded: true });
   },
 }));
