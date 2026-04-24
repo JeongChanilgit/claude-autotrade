@@ -18,7 +18,7 @@ from pathlib import Path
 import duckdb
 import pandas as pd
 
-from kairos.backtest.protocols import BarsData, Interval
+from kairos.backtest.protocols import BarsData, Interval, PortfolioBars
 from kairos.data import paths, query
 
 
@@ -202,4 +202,92 @@ def load_bars(
     )
 
 
-__all__ = ["load_bars", "load_ohlcv", "load_funding", "load_metrics"]
+_OHLCV_FLOAT_COLS = (
+    "open", "high", "low", "close", "volume",
+    "quote_volume", "taker_buy_volume", "taker_buy_quote_volume",
+)
+
+
+def _empty_ohlcv() -> pd.DataFrame:
+    """Build an empty ohlcv frame with BarsData-compliant columns and dtypes.
+
+    Used when a symbol's partition directory does not exist. The portfolio
+    engine handles pre-listing symbols by treating empty ohlcv as flat cash.
+    """
+    df = pd.DataFrame(
+        {c: pd.Series([], dtype="float64") for c in _OHLCV_FLOAT_COLS}
+    )
+    df["trade_count"] = pd.Series([], dtype="int64")
+    # UTC DatetimeIndex matching the non-empty loader output shape.
+    df.index = pd.DatetimeIndex([], tz="UTC")
+    return df
+
+
+def _symbol_partition_exists(
+    symbol: str,
+    interval: Interval,
+    data_root: Path,
+) -> bool:
+    """Check for the hive-partitioned klines directory for this symbol+interval.
+
+    Mirrors the layout produced by kairos.data.paths.parquet_path for klines_*.
+    """
+    part = data_root / "klines" / f"symbol={symbol}" / f"interval={interval}"
+    return part.exists() and next(part.rglob("*.parquet"), None) is not None
+
+
+def load_portfolio(
+    symbols: list[str],
+    interval: Interval,
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+    weights: dict[str, float],
+    *,
+    data_root: Path | None = None,
+) -> PortfolioBars:
+    """Build a PortfolioBars container for N symbols over [start, end).
+
+    For each symbol, calls load_bars(...) if its partition exists; otherwise
+    attaches an empty BarsData (engines handle pre-listing as flat cash, per
+    docs/phase5/PORTFOLIO.md §"Pre-listing handling").
+
+    Raises ValueError if weights.keys() != set(symbols) or if
+    abs(sum(weights.values()) - 1.0) > 1e-9. These are user-input checks, so
+    they raise here (the PortfolioBars __post_init__ uses asserts for the same
+    invariants as a programming-bug safety net).
+    """
+    if set(weights.keys()) != set(symbols):
+        raise ValueError(
+            f"weights keys {sorted(weights.keys())} do not match "
+            f"symbols {sorted(symbols)}"
+        )
+    if abs(sum(weights.values()) - 1.0) > 1e-9:
+        raise ValueError(
+            f"weights must sum to 1.0, got {sum(weights.values())!r}"
+        )
+
+    root = data_root if data_root is not None else paths.DATA_ROOT
+    bars: dict[str, BarsData] = {}
+    for sym in symbols:
+        if _symbol_partition_exists(sym, interval, root):
+            bars[sym] = load_bars(sym, interval, start, end, data_root=data_root)
+        else:
+            # WHY: missing partition = symbol not yet listed (or not downloaded).
+            # Engine treats empty ohlcv as pre-listing flat cash; don't fail here.
+            bars[sym] = BarsData(
+                ohlcv=_empty_ohlcv(),
+                symbol=sym,
+                interval=interval,
+                funding=None,
+                metrics=None,
+            )
+    return PortfolioBars(bars=bars, interval=interval, weights=weights)
+
+
+__all__ = [
+    "load_bars",
+    "load_ohlcv",
+    "load_funding",
+    "load_metrics",
+    "load_portfolio",
+]

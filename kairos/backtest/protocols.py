@@ -28,6 +28,11 @@ from typing import Literal, Protocol
 
 import pandas as pd
 
+# Portfolio-level maximum gross leverage. Frozen, not a tunable parameter —
+# rationale: caps cross-symbol margin-call cascading to a bounded multiple of
+# portfolio equity. See docs/phase5/PORTFOLIO.md §"Capital sharing semantics".
+MAX_LEVERAGE: float = 3.0
+
 # ---- Timestamp convention --------------------------------------------------
 # All DatetimeIndex values are UTC-aware pandas Timestamps.
 # All integer timestamp columns are UTC milliseconds (int64), matching Binance.
@@ -239,13 +244,71 @@ class Engine(Protocol):
     ) -> BacktestResult: ...
 
 
+# ---- Portfolio contracts (Phase 5) -----------------------------------------
+# Added per docs/phase5/PORTFOLIO.md. The single-symbol Engine/BacktestResult
+# above remain alive for strategy unit tests; dashboard/API/RiskSimulator move
+# to the portfolio variants below.
+
+
+@dataclass(frozen=True, slots=True)
+class PortfolioBars:
+    """Aligned multi-symbol input for a portfolio backtest.
+
+    All BarsData entries cover the same [start, end) window and the same
+    interval. Symbols whose listing date is later than `start` have their
+    BarsData ohlcv start at the listing date — the portfolio engine treats
+    pre-listing bars as flat (no signal, no position).
+    """
+    bars: dict[str, BarsData]                    # symbol -> per-symbol bars
+    interval: Interval
+    weights: dict[str, float]                    # symbol -> capital weight, sum=1.0
+
+    def __post_init__(self) -> None:
+        # WHY asserts rather than ValueError: contract invariant, upstream
+        # callers (loader, dashboard) validate before construction; a breach
+        # here is a programming bug, not user input.
+        assert abs(sum(self.weights.values()) - 1.0) < 1e-9
+        assert set(self.bars.keys()) == set(self.weights.keys())
+
+
+@dataclass(frozen=True, slots=True)
+class PortfolioResult:
+    """Output of a portfolio engine run."""
+    equity_curve: pd.Series                      # portfolio equity, UTC index
+    per_symbol_equity: dict[str, pd.Series]      # equity contribution per symbol
+    trades: pd.DataFrame                         # all trades, columns include `symbol`
+    metrics: Mapping[str, float]                 # portfolio-level metrics
+    per_symbol_metrics: dict[str, Mapping[str, float]]
+    engine_name: EngineName
+    params: Mapping[str, object]
+
+
+class PortfolioEngine(Protocol):
+    """Multi-symbol engine. Replaces single-symbol Engine in Phase 5."""
+    name: EngineName
+
+    def run(
+        self,
+        strategies: dict[str, Strategy],         # symbol -> strategy instance
+        portfolio: PortfolioBars,
+        params: dict[str, Mapping[str, object]], # symbol -> strategy params
+        costs: CostModel,
+        symbol_specs: dict[str, SymbolSpec],
+        initial_cash: Decimal,
+    ) -> PortfolioResult: ...
+
+
 __all__ = [
+    "MAX_LEVERAGE",
     "BacktestResult",
     "BarsData",
     "CostModel",
     "Engine",
     "EngineName",
     "Interval",
+    "PortfolioBars",
+    "PortfolioEngine",
+    "PortfolioResult",
     "RiskRules",
     "Side",
     "SignalFrame",

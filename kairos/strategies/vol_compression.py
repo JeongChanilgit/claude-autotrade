@@ -215,3 +215,53 @@ class VolCompressionStrategy:
 
 
 __all__ = ["VolCompressionStrategy"]
+
+
+# --- Registry self-registration -------------------------------------------
+from kairos.strategies.registry import ParamField, StrategyEntry, register
+
+register(
+    StrategyEntry(
+        name="vol_compression",
+        label="Volatility Compression Breakout",
+        factory=lambda: VolCompressionStrategy(),
+        default_params=VolCompressionStrategy.default_params,
+        param_schema={
+            "bb_window": ParamField(
+                type="int", default=20, min=2, max=500,
+                help="Bollinger Band window length (bars).",
+            ),
+            "bb_std": ParamField(
+                type="float", default=2.0, min=0.1, max=10.0,
+                help="Bollinger Band standard-deviation multiplier.",
+            ),
+            "kc_window": ParamField(
+                type="int", default=20, min=2, max=500,
+                help="Keltner Channel EMA/ATR window length (bars).",
+            ),
+            "kc_mult": ParamField(
+                type="float", default=1.5, min=0.1, max=10.0,
+                help="Keltner Channel ATR multiplier.",
+            ),
+            "rsi_window": ParamField(
+                type="int", default=14, min=2, max=200,
+                help="Wilder RSI window length.",
+            ),
+            "divergence_lookback": ParamField(
+                type="int", default=20, min=2, max=500,
+                help="Window (bars) used to detect price/RSI divergence.",
+            ),
+            "holding_bars": ParamField(
+                type="int", default=240, min=1, max=10000,
+                help="Maximum bars a position is held before forced flatten.",
+            ),
+        },
+        supports_funding=False,
+        supports_metrics=False,
+        description=(
+            "Enters on squeeze release (Bollinger inside Keltner) confirmed "
+            "by RSI/price divergence and a direction-consistent mid cross."
+        ),
+    )
+)
+

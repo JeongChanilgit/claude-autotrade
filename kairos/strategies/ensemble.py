@@ -109,17 +109,63 @@ class EnsembleStrategy:
 
 def build_default_ensemble() -> EnsembleStrategy:
     """Production wiring — ORB + Funding Counter + Vol Compression with post-D weights."""
-    from kairos.strategies.funding import FundingCounterStrategy
-    from kairos.strategies.orb import OrbStrategy
-    from kairos.strategies.vol_compression import VolCompressionStrategy
+    # Sub-strategies are fetched through the registry so the ensemble never
+    # owns a direct import path to its components.
+    from kairos.strategies import registry
 
     return EnsembleStrategy(
         {
-            "orb": OrbStrategy(),
-            "funding_counter": FundingCounterStrategy(),
-            "vol_compression": VolCompressionStrategy(),
+            "orb": registry.build("orb"),
+            "funding_counter": registry.build("funding_counter"),
+            "vol_compression": registry.build("vol_compression"),
         }
     )
 
 
 __all__ = ["EnsembleStrategy", "build_default_ensemble"]
+
+
+# --- Registry self-registration -------------------------------------------
+# Must be imported AFTER its sub-strategies have registered themselves, so
+# the factory below can resolve them. `kairos/strategies/__init__.py`
+# enforces that import order.
+from kairos.strategies.registry import ParamField, StrategyEntry, register
+
+register(
+    StrategyEntry(
+        name="ensemble",
+        label="Ensemble (ORB + Funding + Vol-Compression)",
+        factory=lambda: build_default_ensemble(),
+        default_params=EnsembleStrategy.default_params,
+        param_schema={
+            "weights": ParamField(
+                type="string", default={"orb": 0.4, "funding_counter": 0.3, "vol_compression": 0.3},
+                help="Per-sub-strategy weight dict; values must sum to 1.0.",
+            ),
+            "corr_window": ParamField(
+                type="int", default=1440, min=2, max=100000,
+                help="Rolling window (bars) for pairwise correlation of sub signals.",
+            ),
+            "corr_threshold": ParamField(
+                type="float", default=0.6, min=0.0, max=1.0,
+                help="Mean pairwise correlation above which magnitude is shrunk.",
+            ),
+            "corr_shrink_min": ParamField(
+                type="float", default=0.5, min=0.0, max=1.0,
+                help="Minimum shrink factor at mean correlation = 1.0.",
+            ),
+            "signal_threshold": ParamField(
+                type="float", default=0.15, min=0.0, max=1.0,
+                help="Absolute weighted-signal threshold for a non-flat side.",
+            ),
+        },
+        # The ensemble inherits its sub-strategies' data requirements — the
+        # funding_counter sub requires both funding and metrics.
+        supports_funding=True,
+        supports_metrics=True,
+        description=(
+            "Weighted sum of ORB, Funding Counter, and Vol-Compression "
+            "signals with a correlation-shrink penalty on magnitude."
+        ),
+    )
+)

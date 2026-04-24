@@ -1,10 +1,11 @@
 """FastAPI entrypoint for the Kairos backtest dashboard.
 
-Phase 0 scaffold only — routes and WebSocket progress streams land in Phase 4.
-Serves the built React SPA from kairos/dashboard/web/dist when present.
+Wires the REST router, WebSocket router, progress bridge, CORS for local
+Vite dev, and (optionally) the built SPA at the mount root.
 """
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -13,6 +14,11 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from kairos import __version__
+from kairos.dashboard.api import progress
+from kairos.dashboard.api.errors import register_exception_handlers
+from kairos.dashboard.api.reports import reports_router
+from kairos.dashboard.api.routes import api_router
+from kairos.dashboard.api.ws import ws_router
 
 ROOT = Path(__file__).resolve().parents[3]
 WEB_DIST = ROOT / "kairos" / "dashboard" / "web" / "dist"
@@ -27,10 +33,24 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+register_exception_handlers(app)
+
 
 @app.get("/api/health")
 def health() -> JSONResponse:
     return JSONResponse({"status": "ok", "version": __version__})
+
+
+app.include_router(api_router)
+app.include_router(reports_router)
+app.include_router(ws_router)
+
+
+@app.on_event("startup")
+async def _bind_progress_loop() -> None:
+    # Must run after uvicorn creates the event loop — registers the loop so
+    # the progress drainer can fan messages out to WebSocket subscribers.
+    progress.set_loop(asyncio.get_running_loop())
 
 
 if WEB_DIST.exists():

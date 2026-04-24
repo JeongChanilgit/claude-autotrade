@@ -187,3 +187,45 @@ class FundingCounterStrategy:
 
 
 __all__ = ["FundingCounterStrategy"]
+
+
+# --- Registry self-registration -------------------------------------------
+from kairos.strategies.registry import ParamField, StrategyEntry, register
+
+register(
+    StrategyEntry(
+        name="funding_counter",
+        label="Funding Counter",
+        factory=lambda: FundingCounterStrategy(),
+        default_params=FundingCounterStrategy.default_params,
+        param_schema={
+            "funding_threshold": ParamField(
+                type="float", default=0.0005, min=0.0, max=0.1,
+                help="Absolute funding rate above which a reading counts as biased.",
+            ),
+            "consecutive_count": ParamField(
+                type="int", default=3, min=1, max=20,
+                help="Consecutive same-sign funding readings required for bias.",
+            ),
+            "oi_change_min": ParamField(
+                type="float", default=0.02, min=0.0, max=1.0,
+                help="Minimum |24h open-interest change| to confirm bias.",
+            ),
+            "entry_sma_window": ParamField(
+                type="int", default=60, min=2, max=2000,
+                help="SMA window (in bars) used for entry timing.",
+            ),
+            "holding_bars": ParamField(
+                type="int", default=480, min=1, max=10000,
+                help="Maximum bars a position is held before forced flatten.",
+            ),
+        },
+        supports_funding=True,
+        supports_metrics=True,
+        description=(
+            "Mean-reverts against persistently one-sided funding, confirmed "
+            "by 24h open-interest change and timed via an SMA cross."
+        ),
+    )
+)
+

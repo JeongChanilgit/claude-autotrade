@@ -314,3 +314,59 @@ class OrbStrategy:
 
 
 __all__ = ["OrbStrategy"]
+
+
+# --- Registry self-registration -------------------------------------------
+# Imported last so the module's public symbols are defined before the
+# registry captures a factory referencing them.
+from kairos.strategies.registry import ParamField, StrategyEntry, register
+
+register(
+    StrategyEntry(
+        name="orb",
+        label="Opening Range Breakout",
+        factory=lambda: OrbStrategy(),
+        default_params=OrbStrategy.default_params,
+        param_schema={
+            "or_minutes": ParamField(
+                type="int", default=15, min=1, max=240,
+                help="Length of the opening range window in minutes.",
+            ),
+            "session_start_utc": ParamField(
+                type="string", default="00:00",
+                help="Session start HH:MM (UTC).",
+            ),
+            "session_end_utc": ParamField(
+                type="string", default="23:55",
+                help="Session end HH:MM (UTC); positions flatten at this bar.",
+            ),
+            "volume_multiple": ParamField(
+                type="float", default=1.5, min=0.1, max=20.0,
+                help="OR volume must be >= this multiple of the prior baseline.",
+            ),
+            "volume_lookback_days": ParamField(
+                type="int", default=20, min=1, max=200,
+                help="Days of prior OR-window volume used for the baseline.",
+            ),
+            "atr_min_pct": ParamField(
+                type="float", default=0.01, min=0.0, max=1.0,
+                help="Minimum prior-day ATR14/close ratio to allow entry.",
+            ),
+            "tick_buffer": ParamField(
+                type="float", default=0.0, min=0.0, max=1000.0,
+                help="Absolute price buffer added above/below the OR edge.",
+            ),
+            "orr_target_mult": ParamField(
+                type="float", default=2.0, min=0.1, max=20.0,
+                help="Target distance in multiples of the OR range.",
+            ),
+        },
+        supports_funding=False,
+        supports_metrics=False,
+        description=(
+            "Trades the breakout of the first OR-minute UTC window, "
+            "filtered by ATR and OR-window volume vs. a rolling baseline."
+        ),
+    )
+)
+

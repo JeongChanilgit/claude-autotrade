@@ -18,7 +18,7 @@ from kairos.data.quality_report import _format_report, generate_report
 
 log = logging.getLogger("kairos.data.cli")
 
-ALL_DATASETS: tuple[Dataset, ...] = ("klines_1m", "klines_15m", "funding", "metrics")
+ALL_DATASETS: tuple[Dataset, ...] = ("klines_3m", "klines_15m", "funding", "metrics")
 
 
 def _parse_date(s: str) -> date:
@@ -43,8 +43,8 @@ def _months_in_range(start: date, end: date) -> list[date]:
 
 
 def _downloader_for(dataset: Dataset) -> object:
-    if dataset == "klines_1m":
-        return KlinesDownloader("1m")
+    if dataset == "klines_3m":
+        return KlinesDownloader("3m")
     if dataset == "klines_15m":
         return KlinesDownloader("15m")
     if dataset == "funding":
