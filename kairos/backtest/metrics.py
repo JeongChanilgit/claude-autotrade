@@ -53,7 +53,11 @@ def compute_metrics(
     elapsed_years = elapsed_seconds / seconds_per_year
 
     # ------------------------------------------------------------------ CAGR
-    if elapsed_years <= 0 or initial <= 0:
+    # `final <= 0` guard: a strategy that blew through all capital leaves
+    # equity <= 0, and `(negative) ** (fractional)` returns a complex number
+    # which then explodes `math.isnan(cagr)` downstream. Treat total-ruin as
+    # NaN CAGR.
+    if elapsed_years <= 0 or initial <= 0 or final <= 0:
         cagr = _nan
     else:
         try:
