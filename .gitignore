@@ -62,3 +62,4 @@ test-results/
 # Misc
 *.bak
 *.tmp
+.claude/
