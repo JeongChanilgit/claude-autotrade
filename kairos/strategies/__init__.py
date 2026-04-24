@@ -13,5 +13,8 @@ from kairos.strategies import orb as _orb  # noqa: F401
 from kairos.strategies import funding as _funding  # noqa: F401
 from kairos.strategies import vol_compression as _vol_compression  # noqa: F401
 
+# Phase-6 single-symbol 15m strategies (registered independently of the ensemble).
+from kairos.strategies import vwap_reversion as _vwap_reversion  # noqa: F401
+
 # Ensemble last — its factory resolves sub-strategies through the registry.
 from kairos.strategies import ensemble as _ensemble  # noqa: F401

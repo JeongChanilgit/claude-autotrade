@@ -101,7 +101,13 @@ def test_build_returns_strategy_instance():
 
 # --- Production strategy registrations ------------------------------------
 
-EXPECTED_NAMES = {"orb", "funding_counter", "vol_compression", "ensemble"}
+EXPECTED_NAMES = {
+    "orb",
+    "funding_counter",
+    "vol_compression",
+    "ensemble",
+    "vwap_reversion",
+}
 
 
 def test_registry_contains_exactly_four_production_strategies():
