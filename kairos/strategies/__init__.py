@@ -18,6 +18,12 @@ from kairos.strategies import vwap_reversion as _vwap_reversion  # noqa: F401
 from kairos.strategies import ema_pullback as _ema_pullback  # noqa: F401
 from kairos.strategies import donchian_breakout as _donchian_breakout  # noqa: F401
 from kairos.strategies import rsi2_pullback as _rsi2_pullback  # noqa: F401
+from kairos.strategies import bollinger_reversion as _bollinger_reversion  # noqa: F401
+from kairos.strategies import supertrend as _supertrend  # noqa: F401
+from kairos.strategies import inside_bar_breakout as _inside_bar_breakout  # noqa: F401
+from kairos.strategies import macd_zero_cross as _macd_zero_cross  # noqa: F401
+from kairos.strategies import liquidity_sweep as _liquidity_sweep  # noqa: F401
+from kairos.strategies import session_momentum as _session_momentum  # noqa: F401
 
 # Ensemble last — its factory resolves sub-strategies through the registry.
 from kairos.strategies import ensemble as _ensemble  # noqa: F401

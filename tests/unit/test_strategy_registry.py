@@ -110,6 +110,12 @@ EXPECTED_NAMES = {
     "ema_pullback",
     "donchian_breakout",
     "rsi2_pullback",
+    "bollinger_reversion",
+    "supertrend",
+    "inside_bar_breakout",
+    "macd_zero_cross",
+    "liquidity_sweep",
+    "session_momentum",
 }
 
 
