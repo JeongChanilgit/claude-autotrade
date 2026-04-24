@@ -124,12 +124,16 @@ SCHEMA_FUNDING: pa.Schema = pa.schema([
 SCHEMA_METRICS: pa.Schema = pa.schema([
     pa.field("create_time", pa.int64(), nullable=False),             # UTC ms (parsed from "YYYY-MM-DD HH:MM:SS")
     pa.field("symbol", pa.string(), nullable=False),
-    pa.field("sum_open_interest", pa.float64(), nullable=False),
-    pa.field("sum_open_interest_value", pa.float64(), nullable=False),
-    pa.field("count_toptrader_long_short_ratio", pa.float64(), nullable=False),
-    pa.field("sum_toptrader_long_short_ratio", pa.float64(), nullable=False),
-    pa.field("count_long_short_ratio", pa.float64(), nullable=False),
-    pa.field("sum_taker_long_short_vol_ratio", pa.float64(), nullable=False),
+    # Binance occasionally emits NaN rows for ratio columns (source gaps).
+    # Keep them nullable so the downloader can persist the raw bar rather
+    # than drop the whole day. Strategies that use these columns must
+    # .ffill() or drop-na themselves.
+    pa.field("sum_open_interest", pa.float64(), nullable=True),
+    pa.field("sum_open_interest_value", pa.float64(), nullable=True),
+    pa.field("count_toptrader_long_short_ratio", pa.float64(), nullable=True),
+    pa.field("sum_toptrader_long_short_ratio", pa.float64(), nullable=True),
+    pa.field("count_long_short_ratio", pa.float64(), nullable=True),
+    pa.field("sum_taker_long_short_vol_ratio", pa.float64(), nullable=True),
 ])
 """Source CSV cols: create_time,symbol,sum_open_interest,sum_open_interest_value,
 count_toptrader_long_short_ratio,sum_toptrader_long_short_ratio,count_long_short_ratio,
