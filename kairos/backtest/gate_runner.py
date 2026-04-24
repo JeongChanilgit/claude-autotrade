@@ -158,40 +158,47 @@ def run_gate(
         regime_evals = ()
         stress_results = ()
     else:
-        ens_result = engine.run(
-            strategy=ensemble,
-            data=data,
-            params=ensemble.default_params,
-            costs=costs,
-            symbol_spec=spec,
-            initial_cash=initial_cash,
-        )
-        ens_metrics = compute_metrics(
-            ens_result.equity_curve, ens_result.trades, bars_per_year=bars_per_year
-        )
-        headline = EnsembleHeadline(
-            cagr=float(ens_metrics.get("cagr", float("nan"))),
-            mdd=abs(float(ens_metrics.get("mdd", float("nan")))),
-        )
+        try:
+            ens_result = engine.run(
+                strategy=ensemble,
+                data=data,
+                params=ensemble.default_params,
+                costs=costs,
+                symbol_spec=spec,
+                initial_cash=initial_cash,
+            )
+            ens_metrics = compute_metrics(
+                ens_result.equity_curve, ens_result.trades, bars_per_year=bars_per_year
+            )
+            headline = EnsembleHeadline(
+                cagr=float(ens_metrics.get("cagr", float("nan"))),
+                mdd=abs(float(ens_metrics.get("mdd", float("nan")))),
+            )
 
-        regime_evals = evaluate_regimes(
-            strategy=ensemble,
-            data=data,
-            engine=engine,
-            costs=costs,
-            symbol_spec=spec,
-            initial_cash=initial_cash,
-        )
+            regime_evals = evaluate_regimes(
+                strategy=ensemble,
+                data=data,
+                engine=engine,
+                costs=costs,
+                symbol_spec=spec,
+                initial_cash=initial_cash,
+            )
 
-        stress_results = run_stress_suite(
-            strategy=ensemble,
-            data=data,
-            engine=engine,
-            rules=rules,
-            costs=costs,
-            symbol_spec=spec,
-            initial_cash=initial_cash,
-        )
+            stress_results = run_stress_suite(
+                strategy=ensemble,
+                data=data,
+                engine=engine,
+                rules=rules,
+                costs=costs,
+                symbol_spec=spec,
+                initial_cash=initial_cash,
+            )
+        except ValueError as e:
+            log.warning("Ensemble raised: %s", e)
+            headline = EnsembleHeadline(cagr=float("nan"), mdd=float("nan"))
+            ens_metrics = {}
+            regime_evals = ()
+            stress_results = ()
 
     report = compose_phase3_report(
         strategy_sharpes=strategy_sharpes,

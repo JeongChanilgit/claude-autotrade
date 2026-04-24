@@ -26,6 +26,8 @@ def _to_utc_index(df: pd.DataFrame, ts_col: str) -> pd.DataFrame:
     """Convert int64 ms column to DatetimeIndex (UTC) and sort."""
     idx = pd.to_datetime(df[ts_col], unit="ms", utc=True)
     df = df.drop(columns=[ts_col]).set_index(idx).sort_index()
+    # keep="last": re-pulled rows appear later in the partition and carry corrected values (see d521c69)
+    df = df[~df.index.duplicated(keep="last")]
     df.index.name = None
     return df
 

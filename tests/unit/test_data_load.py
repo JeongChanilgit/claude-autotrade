@@ -5,6 +5,7 @@ import pandas as pd
 import pytest
 
 from kairos.data.load import load_bars, load_ohlcv
+from kairos.data.load import _to_utc_index
 
 
 _DATA_ROOT_BTC_2024_03 = "data/klines/symbol=BTCUSDT/interval=1m/year=2024/month=03"
@@ -16,12 +17,26 @@ def _has_march_2024_data() -> bool:
     return p.exists() and any(p.glob("*.parquet"))
 
 
-pytestmark = pytest.mark.skipif(
+_skip_no_data = pytest.mark.skipif(
     not _has_march_2024_data(),
     reason="requires BTCUSDT 1m 2024-03 partitions (Phase 1 gate data)",
 )
 
 
+def test_to_utc_index_deduplicates_timestamps() -> None:
+    """_to_utc_index must drop duplicate timestamps, keeping the last row."""
+    ts_ms = 1_700_000_000_000  # arbitrary epoch ms
+    df = pd.DataFrame(
+        {"ts": [ts_ms, ts_ms, ts_ms + 60_000], "value": [1.0, 2.0, 3.0]}
+    )
+    result = _to_utc_index(df, "ts")
+    assert result.index.has_duplicates is False
+    assert len(result) == 2
+    # keep="last": the second row (value=2.0) survives for the duplicated ts
+    assert result["value"].iloc[0] == 2.0
+
+
+@_skip_no_data
 def test_load_ohlcv_returns_expected_shape() -> None:
     start = pd.Timestamp("2024-03-15", tz="UTC")
     end = pd.Timestamp("2024-03-22", tz="UTC")
@@ -38,6 +53,7 @@ def test_load_ohlcv_returns_expected_shape() -> None:
     assert df.index.is_monotonic_increasing
 
 
+@_skip_no_data
 def test_load_bars_builds_barsdata_container() -> None:
     start = pd.Timestamp("2024-03-15", tz="UTC")
     end = pd.Timestamp("2024-03-16", tz="UTC")
@@ -48,6 +64,7 @@ def test_load_bars_builds_barsdata_container() -> None:
     # funding/metrics may be None if not downloaded — just check no crash.
 
 
+@_skip_no_data
 def test_load_ohlcv_half_open_interval() -> None:
     """end is exclusive — last timestamp must be < end."""
     start = pd.Timestamp("2024-03-15", tz="UTC")
@@ -57,6 +74,7 @@ def test_load_ohlcv_half_open_interval() -> None:
     assert df.index[0] >= start
 
 
+@_skip_no_data
 def test_load_ohlcv_empty_for_unknown_symbol() -> None:
     start = pd.Timestamp("2024-03-15", tz="UTC")
     end = pd.Timestamp("2024-03-16", tz="UTC")
