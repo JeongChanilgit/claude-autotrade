@@ -116,6 +116,10 @@ EXPECTED_NAMES = {
     "macd_zero_cross",
     "liquidity_sweep",
     "session_momentum",
+    "atr_breakout_rr",
+    "swing_trend_rr",
+    "vwap_target_rr",
+    "pivot_target_rr",
 }
 
 

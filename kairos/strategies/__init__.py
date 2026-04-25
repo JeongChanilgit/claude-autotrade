@@ -25,5 +25,11 @@ from kairos.strategies import macd_zero_cross as _macd_zero_cross  # noqa: F401
 from kairos.strategies import liquidity_sweep as _liquidity_sweep  # noqa: F401
 from kairos.strategies import session_momentum as _session_momentum  # noqa: F401
 
+# R:R strategies with explicit stop/target columns.
+from kairos.strategies import atr_breakout_rr as _atr_breakout_rr  # noqa: F401
+from kairos.strategies import swing_trend_rr as _swing_trend_rr  # noqa: F401
+from kairos.strategies import vwap_target_rr as _vwap_target_rr  # noqa: F401
+from kairos.strategies import pivot_target_rr as _pivot_target_rr  # noqa: F401
+
 # Ensemble last — its factory resolves sub-strategies through the registry.
 from kairos.strategies import ensemble as _ensemble  # noqa: F401
